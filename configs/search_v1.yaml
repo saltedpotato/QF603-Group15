@@ -1,0 +1,13 @@
+search:
+  alphas: [0.01, 0.1, 0.5, 1.0, 2.0, 5.0]
+  folds: 5
+  horizon: 1
+features:
+  price_col: Price
+  windows: [5, 20]
+split:
+  timestamp_column: Date
+  train_end: 2022-12-31
+  test_start: 2023-01-01
+metrics:
+  metric: mse

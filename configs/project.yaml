@@ -1,0 +1,28 @@
+project:
+  name: QF603-Group15
+  version: 0.0.1
+paths:
+  data_raw: data/raw
+  data_processed: data/processed
+  data_interim: data/interim
+  figures: reports/figures
+  backtest: reports/backtest
+  compare: reports/compare
+  final_report: reports/final
+  input_csv: data/TLT_2007-01-01_to_2025-08-30.csv
+data:
+  frequency: daily
+  timestamp_column: Date
+  target_column: Close
+  id_columns: []
+  expected_columns: [Date, Open, High, Low, Close, Adj Close, Volume]
+assumptions:
+  timezone: UTC
+  missing_value_strategy: forward_fill_then_drop
+  outlier_strategy: winsorize_1pct
+  returns_definition: log_return
+  train_test_split:
+    method: time_series_split
+    train_end: 2022-12-31
+    test_start: 2023-01-01
+  transaction_cost_bps: 5

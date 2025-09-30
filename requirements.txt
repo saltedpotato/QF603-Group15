@@ -1,0 +1,47 @@
+# Core scientific computing libraries
+numpy>=1.21.0
+pandas>=1.3.0
+scipy>=1.7.0
+
+# Machine learning and statistics
+scikit-learn>=1.0.0
+statsmodels>=0.13.0
+
+# Financial data and technical analysis
+yfinance>=0.1.70
+ta>=0.10.0
+
+# Wavelet analysis
+PyWavelets>=1.4.0
+
+# Optimization
+optuna>=3.0.0
+scikit-optimize>=0.9.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+plotly>=5.0.0
+
+# Deep learning (optional)
+torch>=1.10.0
+tensorflow>=2.8.0
+
+# Production and monitoring
+redis>=4.0.0
+kafka-python>=2.0.0
+mlflow>=1.20.0
+
+# Jupyter and development
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
+# Testing and quality
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=22.0.0
+flake8>=5.0.0
+
+# Documentation
+sphinx>=5.0.0
+sphinx-rtd-theme>=1.0.0

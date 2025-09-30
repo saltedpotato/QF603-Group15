@@ -1,0 +1,7 @@
+{
+  "columns": {
+    "Date": "datetime64[ns]",
+    "Price": "float64",
+    "Realized_Vol": "float64"
+  }
+}

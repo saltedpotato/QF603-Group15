@@ -1,0 +1,12 @@
+# Byte-compiled/ __pycache__
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.env
+.ipynb_checkpoints/
+reports/final/
+
+# OS
+.DS_Store
+Thumbs.db

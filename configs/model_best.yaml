@@ -1,0 +1,14 @@
+model:
+  type: ridge
+  alpha: 0.01
+features:
+  price_col: Price
+  windows:
+  - 5
+  - 20
+split:
+  timestamp_column: Date
+  train_end: 2022-12-31
+  test_start: 2023-01-01
+metrics:
+  transaction_cost_bps: 5
