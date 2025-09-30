@@ -96,9 +96,115 @@ def model_confidence_set(y_true, predictions_dict, alpha=0.05, B=1000):
     
     return mcs_results, best_model
 
+# Value-at-Risk Backtesting
+def kupiec_test(returns, var, alpha=0.05):
+    """
+    Kupiec's unconditional coverage test for VaR
+    """
+    violations = returns < -var
+    n = len(returns)
+    x = np.sum(violations)  # Number of violations
+    p_hat = x / n  # Empirical violation rate
+    
+    likelihood_ratio = -2 * np.log(
+        ((1 - alpha) ** (n - x) * alpha ** x) / 
+        ((1 - p_hat) ** (n - x) * p_hat ** x)
+    )
+    
+    p_value = 1 - chi2.cdf(likelihood_ratio, 1)
+    
+    return {
+        'violations': x,
+        'violation_rate': p_hat,
+        'expected_rate': alpha,
+        'LR_stat': likelihood_ratio,
+        'p_value': p_value
+    }
+
+def christoffersen_test(returns, var, alpha=0.05):
+    """
+    Christoffersen's conditional coverage test for VaR
+    """
+    violations = returns < -var
+    n = len(violations)
+    
+    # Transition counts
+    n00 = n01 = n10 = n11 = 0
+    for i in range(1, n):
+        if violations[i-1] == 0 and violations[i] == 0:
+            n00 += 1
+        elif violations[i-1] == 0 and violations[i] == 1:
+            n01 += 1
+        elif violations[i-1] == 1 and violations[i] == 0:
+            n10 += 1
+        elif violations[i-1] == 1 and violations[i] == 1:
+            n11 += 1
+    
+    # Unconditional coverage (same as Kupiec)
+    x = np.sum(violations)
+    p_hat = x / n
+    LR_uc = -2 * np.log(
+        ((1 - alpha) ** (n - x) * alpha ** x) / 
+        ((1 - p_hat) ** (n - x) * p_hat ** x)
+    )
+    
+    # Independence test
+    if n00 + n01 > 0 and n10 + n11 > 0:
+        pi0 = n01 / (n00 + n01)
+        pi1 = n11 / (n10 + n11)
+        pi = (n01 + n11) / (n00 + n01 + n10 + n11)
+        
+        LR_ind = -2 * np.log(
+            ((1 - pi) ** (n00 + n10) * pi ** (n01 + n11)) / 
+            ((1 - pi0) ** n00 * pi0 ** n01 * (1 - pi1) ** n10 * pi1 ** n11)
+        )
+    else:
+        LR_ind = 0
+    
+    # Conditional coverage
+    LR_cc = LR_uc + LR_ind
+    p_value_cc = 1 - chi2.cdf(LR_cc, 2)
+    
+    return {
+        'LR_conditional': LR_cc,
+        'p_value_conditional': p_value_cc,
+        'LR_independence': LR_ind,
+        'LR_unconditional': LR_uc
+    }
+
+# Economic Utility via Volatility Targeting
+def volatility_targeting_portfolio(returns, volatility_forecast, target_volatility=0.15):
+    """
+    Calculate economic utility through volatility targeting
+    
+    Parameters:
+    returns: asset returns
+    volatility_forecast: predicted volatility
+    target_volatility: annual target volatility
+    """
+    # Scale returns based on volatility forecast
+    scaling_factor = target_volatility / (volatility_forecast * np.sqrt(252))
+    scaled_returns = returns * np.minimum(scaling_factor, 1)  # Cap at 1 (no leverage)
+    
+    # Calculate performance metrics
+    annual_return = np.mean(scaled_returns) * 252
+    annual_volatility = np.std(scaled_returns) * np.sqrt(252)
+    sharpe_ratio = annual_return / annual_volatility if annual_volatility > 0 else 0
+    
+    # Certainty equivalent return (assuming CRRA utility with gamma=2)
+    ce_return = np.mean(scaled_returns) - 0.5 * np.var(scaled_returns)
+    
+    return {
+        'annual_return': annual_return,
+        'annual_volatility': annual_volatility,
+        'sharpe_ratio': sharpe_ratio,
+        'certainty_equivalent': ce_return,
+        'scaled_returns': scaled_returns
+    }
 
 # Main Evaluation Function
-def comprehensive_evaluation(y_test, y_pred, benchmark_pred=None):
+def comprehensive_evaluation(y_test, y_pred, benchmark_pred=None, returns=None, 
+                           volatility_forecast=None, alpha=0.05):
     """
     Comprehensive evaluation of forecasting model
     
@@ -106,6 +212,9 @@ def comprehensive_evaluation(y_test, y_pred, benchmark_pred=None):
     y_test: actual values
     y_pred: model predictions
     benchmark_pred: benchmark model predictions (for DM test)
+    returns: return series (for VaR backtesting)
+    volatility_forecast: volatility predictions (for economic utility)
+    alpha: significance level for VaR
     """
     
     results = {}
@@ -143,6 +252,36 @@ def comprehensive_evaluation(y_test, y_pred, benchmark_pred=None):
         for model, result in mcs_results.items():
             status = "IN" if result['in_mcs'] else "OUT"
             print(f"  {model}: {status} (p-value: {result['p_value']:.4f})")
+    
+    # Economic Metrics
+    if returns is not None and volatility_forecast is not None:
+        print("\n=== ECONOMIC METRICS ===")
+        
+        # VaR Backtesting
+        var_level = np.percentile(returns, alpha * 100)
+        var_forecast = -volatility_forecast * norm.ppf(alpha)
+        
+        kupiec_results = kupiec_test(returns, var_forecast, alpha)
+        christoffersen_results = christoffersen_test(returns, var_forecast, alpha)
+        
+        results['VaR_Kupiec'] = kupiec_results
+        results['VaR_Christoffersen'] = christoffersen_results
+        
+        print("VaR Backtesting Results:")
+        print(f"  Violations: {kupiec_results['violations']}/{len(returns)} "
+              f"({kupiec_results['violation_rate']:.3%})")
+        print(f"  Kupiec Test p-value: {kupiec_results['p_value']:.4f}")
+        print(f"  Christoffersen Test p-value: {christoffersen_results['p_value_conditional']:.4f}")
+        
+        # Economic Utility
+        utility_results = volatility_targeting_portfolio(returns, volatility_forecast)
+        results['Economic_Utility'] = utility_results
+        
+        print("Economic Utility (Volatility Targeting):")
+        print(f"  Annual Return: {utility_results['annual_return']:.3%}")
+        print(f"  Annual Volatility: {utility_results['annual_volatility']:.3%}")
+        print(f"  Sharpe Ratio: {utility_results['sharpe_ratio']:.4f}")
+        print(f"  Certainty Equivalent: {utility_results['certainty_equivalent']:.6f}")
     
     return results
 
