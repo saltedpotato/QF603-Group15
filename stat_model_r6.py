@@ -62,6 +62,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from networkx import display
+
 class VolatilityReportGenerator:
     """
     A comprehensive report generator for volatility forecasting analysis.
@@ -262,18 +264,7 @@ from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.stats.diagnostic import acorr_ljungbox
 
 from sklearn.linear_model import LinearRegression, ElasticNet, Lasso
-from sklearn.svm import SVR
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor, GradientBoostingRegressor, AdaBoostRegressor
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error as mse
-from statsmodels.tsa.arima.model import ARIMA
-
 from scipy.stats import norm
-
-
 # %%
 import numpy as np
 import pandas as pd
@@ -884,9 +875,11 @@ diag_tbl = pd.DataFrame(summary_rows).set_index("Estimator")
 
 # Convenience column: both stationarity tests agree
 diag_tbl["Stationary (ADF∩KPSS)"] = diag_tbl["ADF pass (p≤α)"] & diag_tbl["KPSS pass (p>α)"]
-
-with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
-    display(diag_tbl)
+# try:
+#     with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
+#         display(diag_tbl)
+# except:
+#     print(diag_tbl)
 
 # %%
 # Add diagnostics table to report
@@ -1452,14 +1445,14 @@ for w in window:
 
 # %%
 # Read into DataFrame - exogeneous variables
-IV_y_values = pd.read_csv('MOVE_index.csv')
-Fed_funds = pd.read_csv('FedFunds.csv')
-UST_10Y = pd.read_csv('UST10Y.csv')
-HYOAS = pd.read_csv('HYOAS.csv')
-NFCI = pd.read_csv('NFCI.csv')
-Termspread = pd.read_csv('TermSpread_10Y_2Y.csv')
-vix = pd.read_csv('VIX.csv')
-Breakeven_10Y = pd.read_csv('Breakeven10Y.csv')
+IV_y_values = pd.read_csv(f'{data_folder}/MOVE_index.csv')
+Fed_funds = pd.read_csv(f'{data_folder}/FedFunds.csv')
+UST_10Y = pd.read_csv(f'{data_folder}/UST10Y.csv')
+HYOAS = pd.read_csv(f'{data_folder}/HYOAS.csv')
+NFCI = pd.read_csv(f'{data_folder}/NFCI.csv')
+Termspread = pd.read_csv(f'{data_folder}/TermSpread_10Y_2Y.csv')
+vix = pd.read_csv(f'{data_folder}/VIX.csv')
+Breakeven_10Y = pd.read_csv(f'{data_folder}/Breakeven10Y.csv')
 
 # %%
 exo_variables = [UST_10Y, HYOAS, Termspread, vix, Breakeven_10Y]
@@ -1579,8 +1572,8 @@ diag_tbl = pd.DataFrame(summary_rows).set_index("Estimator")
 # Convenience column: both stationarity tests agree
 diag_tbl["Stationary (ADF∩KPSS)"] = diag_tbl["ADF pass (p≤α)"] & diag_tbl["KPSS pass (p>α)"]
 
-with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
-    display(diag_tbl)
+# with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
+#     display(diag_tbl)
 
 # %%
 # Add HARX exogenous variables diagnostics to report
@@ -1657,8 +1650,8 @@ diag_tbl = pd.DataFrame(summary_rows).set_index("Estimator")
 # Convenience column: both stationarity tests agree
 diag_tbl["Stationary (ADF∩KPSS)"] = diag_tbl["ADF pass (p≤α)"] & diag_tbl["KPSS pass (p>α)"]
 
-with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
-    display(diag_tbl)
+# with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
+#     display(diag_tbl)
 
 # %%
 # Plot ACF and PACF for each log-vol estimator
@@ -2882,6 +2875,21 @@ The Heterogeneous Autoregressive (HAR) model captures volatility at multiple tim
 - **RMSE**: Root mean squared error, interpretable scale for forecast errors
 """)
 
+# %% [markdown]
+# ## Final Report Generation
+
+# %%
+print("\n" + "="*80)
+print("FINALIZING REPORT")
+print("="*80)
+print("\nHAR and HARX statistical models analysis complete.")
+print("For ML and TFT models, please run: ml_tft_models.py")
+print("="*80 + "\n")
+
+# Note: ML and TFT models have been moved to ml_tft_models.py for independent execution
+
+
+
 # Finalize the report
 report.finalize_report()
 
@@ -2899,719 +2907,6 @@ print(f"  ✓ Test set evaluation results")
 print(f"  ✓ Conclusions and recommendations")
 print(f"\nUse this report as a blueprint for your final presentation!")
 print("="*80)
-
-# %% [markdown]
-# ## 📊 Machine Learning Models Implementation
-# 
-# This section implements advanced machine learning models for volatility forecasting:
-# - Traditional ML: Random Forest, Gradient Boosting, XGBoost, LightGBM, CatBoost
-# - Deep Learning: Temporal Fusion Transformer (TFT)
-# 
-# All models use the same rolling window approach and feature engineering as HAR-X.
-
-# %%
-# Import ML libraries
-import xgboost as xgb
-import lightgbm as lgb
-import catboost as cb
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-
-print("✓ ML libraries imported successfully")
-
-# %% [markdown]
-# ### ML Model Class Implementation
-
-# %%
-class ML_Volatility_Model:
-    """
-    Machine Learning model wrapper for volatility forecasting.
-    Supports multiple ML algorithms with rolling window prediction.
-    """
-    
-    def __init__(self, model_type='xgboost', model_params=None):
-        """
-        Initialize ML model.
-        
-        Parameters:
-        -----------
-        model_type : str
-            Type of model: 'rf', 'gbm', 'xgboost', 'lightgbm', 'catboost'
-        model_params : dict
-            Model-specific hyperparameters
-        """
-        self.model_type = model_type
-        self.model_params = model_params or {}
-        self.model = None
-        
-    def _get_model(self):
-        """Initialize the appropriate model based on model_type"""
-        if self.model_type == 'rf':
-            return RandomForestRegressor(
-                n_estimators=self.model_params.get('n_estimators', 100),
-                max_depth=self.model_params.get('max_depth', 10),
-                min_samples_split=self.model_params.get('min_samples_split', 5),
-                random_state=42,
-                n_jobs=-1
-            )
-        elif self.model_type == 'gbm':
-            return GradientBoostingRegressor(
-                n_estimators=self.model_params.get('n_estimators', 100),
-                max_depth=self.model_params.get('max_depth', 5),
-                learning_rate=self.model_params.get('learning_rate', 0.1),
-                random_state=42
-            )
-        elif self.model_type == 'xgboost':
-            return xgb.XGBRegressor(
-                n_estimators=self.model_params.get('n_estimators', 100),
-                max_depth=self.model_params.get('max_depth', 5),
-                learning_rate=self.model_params.get('learning_rate', 0.1),
-                subsample=self.model_params.get('subsample', 0.8),
-                colsample_bytree=self.model_params.get('colsample_bytree', 0.8),
-                random_state=42,
-                n_jobs=-1
-            )
-        elif self.model_type == 'lightgbm':
-            return lgb.LGBMRegressor(
-                n_estimators=self.model_params.get('n_estimators', 100),
-                max_depth=self.model_params.get('max_depth', 5),
-                learning_rate=self.model_params.get('learning_rate', 0.1),
-                subsample=self.model_params.get('subsample', 0.8),
-                colsample_bytree=self.model_params.get('colsample_bytree', 0.8),
-                random_state=42,
-                n_jobs=-1,
-                verbose=-1
-            )
-        elif self.model_type == 'catboost':
-            return cb.CatBoostRegressor(
-                iterations=self.model_params.get('n_estimators', 100),
-                depth=self.model_params.get('max_depth', 5),
-                learning_rate=self.model_params.get('learning_rate', 0.1),
-                random_state=42,
-                verbose=False
-            )
-        else:
-            raise ValueError(f"Unknown model type: {self.model_type}")
-    
-    def fit_predict_rolling(self, X_train, y_train, window):
-        """
-        Perform rolling window prediction.
-        
-        Parameters:
-        -----------
-        X_train : pd.DataFrame
-            Feature matrix
-        y_train : pd.Series
-            Target variable (log variance)
-        window : int
-            Rolling window size
-            
-        Returns:
-        --------
-        yhat_full : pd.Series
-            Predictions (log variance)
-        residual_raw : pd.Series
-            Raw residuals
-        """
-        yhat_full = pd.Series(index=y_train.index, data=np.nan)
-        residual_raw = pd.Series(index=y_train.index, data=np.nan)
-        
-        for t in range(window, len(y_train)):
-            # Extract window
-            y_slice = y_train.iloc[t-window:t]
-            x_slice = X_train.iloc[t-window:t]
-            
-            # Align indices
-            common_idx = x_slice.index.intersection(y_slice.index)
-            y_slice = y_train.loc[common_idx]
-            x_slice = X_train.loc[common_idx]
-            
-            # Train model
-            self.model = self._get_model()
-            self.model.fit(x_slice, y_slice)
-            
-            # Predict next step
-            x_next = X_train.iloc[t:t+1]
-            yhat_full.iloc[t] = self.model.predict(x_next)[0]
-            residual_raw.iloc[t] = yhat_full.iloc[t] - y_train.iloc[t]
-        
-        return yhat_full, residual_raw
-
-# %% [markdown]
-# ### Train ML Models on Training Set
-
-# %%
-print("="*80)
-print("TRAINING MACHINE LEARNING MODELS")
-print("="*80)
-
-# Use same data preparation as HARX
-estimators = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']
-exo_cols = ['UST10Y', 'HYOAS', 'TermSpread_10Y_2Y', 'VIX', 'Breakeven10Y']
-window_ml = 756  # Use best performing window from HARX
-
-# Prepare feature matrix for ML models
-ml_results = {}
-ml_model_types = ['rf', 'gbm', 'xgboost', 'lightgbm', 'catboost']
-
-for model_name in ml_model_types:
-    print(f"\n{'='*60}")
-    print(f"Training {model_name.upper()} model...")
-    print(f"{'='*60}")
-    
-    ml_results[model_name] = {}
-    
-    for est in estimators:
-        print(f"  Processing estimator: {est}")
-        
-        # Prepare features (same as HARX)
-        df_in = pd.concat([train_x[[est]], exo_harx_train[exo_cols]], axis=1)
-        har = HAR_Model(y_log_col=est, exo_col=exo_cols, lags=[1,5,22])
-        x_est = har.features(df_in)
-        y_adj = train_y.loc[x_est.index]
-        
-        # Train ML model
-        ml_model = ML_Volatility_Model(
-            model_type=model_name,
-            model_params={'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05}
-        )
-        
-        y_pred, residual_raw = ml_model.fit_predict_rolling(x_est, y_adj, window=window_ml)
-        
-        ml_results[model_name][est] = {
-            'predictions': y_pred,
-            'residuals': residual_raw
-        }
-    
-    print(f"✓ {model_name.upper()} model training completed")
-
-print("\n" + "="*80)
-print("✓ ALL ML MODELS TRAINED SUCCESSFULLY")
-print("="*80)
-
-# %% [markdown]
-# ### Create Ensemble Predictions for ML Models
-
-# %%
-print("\nCreating ensemble predictions for ML models...")
-
-ml_ensemble_results = {}
-
-for model_name in ml_model_types:
-    print(f"\nProcessing {model_name.upper()} ensemble...")
-    
-    # Collect predictions from all estimators
-    df_pred_ml = pd.DataFrame({
-        est: ml_results[model_name][est]['predictions']
-        for est in estimators
-    })
-    
-    df_pred_ml_adj = df_pred_ml.dropna()
-    
-    # Convert to variance scale
-    yhat_var_ml = np.exp(df_pred_ml_adj)
-    ytrue_var = np.exp(train_y)
-    
-    # Align indices
-    common_idx = yhat_var_ml.index.intersection(ytrue_var.index)
-    yhat = yhat_var_ml.loc[common_idx]
-    ytrue = ytrue_var.loc[common_idx]
-    
-    # Calculate QLIKE for weighting
-    qlike_loss_ml = pd.DataFrame({
-        col: Metric_Evaluation.qlike(ytrue, yhat[col])
-        for col in yhat.columns
-    })
-    
-    # Compute ensemble weights
-    ensemble_model = EnsembleModel(estimators=None)
-    qlike_mean_ml = qlike_loss_ml.mean()
-    weights_ml = ensemble_model.compute_weightage(qlike_mean_ml)
-    
-    # Create weighted ensemble
-    wts_ml = pd.Series(weights_ml, index=yhat.columns, dtype=float)
-    yhat_ensemble_ml = yhat.dot(wts_ml)
-    log_yhat_ensemble_ml = np.log(yhat_ensemble_ml)
-    
-    # Calculate metrics
-    qlike_loss_ensemble_ml = Metric_Evaluation.qlike(ytrue, yhat_ensemble_ml)
-    mspe_loss_ensemble_ml = Metric_Evaluation.mspe(ytrue, yhat_ensemble_ml)
-    
-    ml_ensemble_results[model_name] = {
-        'predictions_log': log_yhat_ensemble_ml,
-        'predictions_var': yhat_ensemble_ml,
-        'weights': wts_ml,
-        'qlike_mean': qlike_loss_ensemble_ml.mean(),
-        'qlike_std': qlike_loss_ensemble_ml.std(),
-        'mspe_mean': mspe_loss_ensemble_ml.mean(),
-        'mspe_std': mspe_loss_ensemble_ml.std()
-    }
-    
-    print(f"  QLIKE Mean: {ml_ensemble_results[model_name]['qlike_mean']:.4f}")
-    print(f"  MSPE Mean: {ml_ensemble_results[model_name]['mspe_mean']:.4f}")
-
-print("\n✓ ML ensemble predictions created")
-
-# %% [markdown]
-# ### ML Models Performance Summary
-
-# %%
-# Create performance comparison table
-ml_performance_summary = pd.DataFrame({
-    'Model': ml_model_types,
-    'QLIKE_mean': [ml_ensemble_results[m]['qlike_mean'] for m in ml_model_types],
-    'QLIKE_std': [ml_ensemble_results[m]['qlike_std'] for m in ml_model_types],
-    'MSPE_mean': [ml_ensemble_results[m]['mspe_mean'] for m in ml_model_types],
-    'MSPE_std': [ml_ensemble_results[m]['mspe_std'] for m in ml_model_types]
-}).set_index('Model')
-
-print("\n" + "="*80)
-print("ML MODELS PERFORMANCE SUMMARY (Training Set)")
-print("="*80)
-print(ml_performance_summary.round(4))
-print("="*80)
-
-# Add to report
-report.add_section("Machine Learning Models Results", level=2)
-report.add_section("ML Models Performance (Training Set)", level=3)
-report.add_text("""
-The following table presents the performance of traditional machine learning models
-for volatility forecasting. All models use the same feature engineering as HAR-X
-with a rolling window of 756 days.
-
-**Models Implemented:**
-- **Random Forest (RF)**: Ensemble of decision trees with bootstrap aggregation
-- **Gradient Boosting (GBM)**: Sequential tree building with gradient descent
-- **XGBoost**: Optimized gradient boosting with regularization
-- **LightGBM**: Fast gradient boosting with histogram-based learning
-- **CatBoost**: Gradient boosting with ordered boosting and categorical features support
-""")
-report.add_table(ml_performance_summary, caption="Table 13: ML Models Performance Summary")
-
-# %% [markdown]
-# ### Temporal Fusion Transformer (TFT) Implementation
-
-# %%
-print("\n" + "="*80)
-print("IMPLEMENTING TEMPORAL FUSION TRANSFORMER (TFT)")
-print("="*80)
-
-# Import TFT libraries
-import torch
-from pytorch_forecasting import TimeSeriesDataSet, TemporalFusionTransformer
-from pytorch_forecasting.data import GroupNormalizer
-from pytorch_forecasting.metrics import RMSE, MAE, SMAPE
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
-import warnings
-warnings.filterwarnings('ignore')
-
-print("✓ TFT libraries imported successfully")
-
-# %% [markdown]
-# ### Prepare Sequential Data for TFT
-
-# %%
-def prepare_tft_data(vol_data, exo_data, y_true, max_encoder_length=22, max_prediction_length=1):
-    """
-    Prepare time series data for TFT model.
-    
-    Parameters:
-    -----------
-    vol_data : pd.DataFrame
-        Volatility estimators (lagged)
-    exo_data : pd.DataFrame
-        Exogenous variables
-    y_true : pd.Series
-        Target variable (log variance)
-    max_encoder_length : int
-        Length of encoder sequence (lookback window)
-    max_prediction_length : int
-        Length of prediction horizon
-        
-    Returns:
-    --------
-    pd.DataFrame : Prepared data for TFT
-    """
-    # Combine all features
-    df_combined = pd.concat([vol_data, exo_data, y_true.rename('target')], axis=1)
-    df_combined = df_combined.dropna()
-    
-    # Add time index
-    df_combined = df_combined.reset_index()
-    df_combined['time_idx'] = range(len(df_combined))
-    df_combined['group'] = 'TLT'  # Single time series group
-    
-    # Ensure all columns are numeric
-    for col in df_combined.columns:
-        if col not in ['Date', 'group']:
-            df_combined[col] = pd.to_numeric(df_combined[col], errors='coerce')
-    
-    df_combined = df_combined.dropna()
-    
-    return df_combined
-
-print("Preparing TFT dataset...")
-
-# Prepare data for TFT
-tft_train_data = prepare_tft_data(
-    vol_data=train_x[['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']],
-    exo_data=exo_harx_train[exo_cols],
-    y_true=train_y,
-    max_encoder_length=22,
-    max_prediction_length=1
-)
-
-print(f"✓ TFT training data prepared: {tft_train_data.shape}")
-print(f"  Columns: {list(tft_train_data.columns)}")
-print(f"  Date range: {tft_train_data['Date'].min()} to {tft_train_data['Date'].max()}")
-
-# %% [markdown]
-# ### Create TFT TimeSeriesDataSet
-
-# %%
-# Define validation split (last 20% of training data)
-training_cutoff = tft_train_data['time_idx'].max() - int(0.2 * len(tft_train_data))
-
-# Time-varying features (change over time)
-time_varying_known_reals = exo_cols  # Exogenous variables
-time_varying_unknown_reals = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log', 'target']
-
-print(f"Training cutoff: {training_cutoff}")
-print(f"Time-varying known reals: {time_varying_known_reals}")
-print(f"Time-varying unknown reals: {time_varying_unknown_reals}")
-
-# Create TimeSeriesDataSet
-training_tft = TimeSeriesDataSet(
-    tft_train_data[tft_train_data['time_idx'] <= training_cutoff],
-    time_idx='time_idx',
-    target='target',
-    group_ids=['group'],
-    min_encoder_length=22,
-    max_encoder_length=22,
-    min_prediction_length=1,
-    max_prediction_length=1,
-    time_varying_known_reals=time_varying_known_reals,
-    time_varying_unknown_reals=time_varying_unknown_reals,
-    target_normalizer=GroupNormalizer(groups=['group'], transformation='softplus'),
-    add_relative_time_idx=True,
-    add_target_scales=True,
-    add_encoder_length=True,
-)
-
-# Create validation dataset
-validation_tft = TimeSeriesDataSet.from_dataset(
-    training_tft,
-    tft_train_data,
-    predict=False,
-    stop_randomization=True
-)
-
-# Create dataloaders
-batch_size = 64
-train_dataloader = training_tft.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
-val_dataloader = validation_tft.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
-
-print(f"✓ TFT datasets created")
-print(f"  Training samples: {len(training_tft)}")
-print(f"  Validation samples: {len(validation_tft)}")
-print(f"  Batch size: {batch_size}")
-
-# %% [markdown]
-# ### Train TFT Model
-
-# %%
-print("\n" + "="*60)
-print("TRAINING TEMPORAL FUSION TRANSFORMER")
-print("="*60)
-
-# Configure TFT model
-tft = TemporalFusionTransformer.from_dataset(
-    training_tft,
-    learning_rate=0.001,
-    hidden_size=64,
-    attention_head_size=4,
-    dropout=0.1,
-    hidden_continuous_size=32,
-    output_size=7,
-    loss=RMSE(),
-    log_interval=10,
-    reduce_on_plateau_patience=4,
-)
-
-print(f"✓ TFT model configured")
-print(f"  Hidden size: 64")
-print(f"  Attention heads: 4")
-print(f"  Dropout: 0.1")
-
-# Configure trainer
-early_stop_callback = EarlyStopping(
-    monitor='val_loss',
-    min_delta=1e-4,
-    patience=10,
-    verbose=False,
-    mode='min'
-)
-
-trainer = Trainer(
-    max_epochs=50,
-    accelerator='auto',
-    enable_model_summary=True,
-    gradient_clip_val=0.1,
-    callbacks=[early_stop_callback],
-    enable_progress_bar=True,
-    enable_checkpointing=False,
-)
-
-print("✓ Trainer configured")
-print("  Max epochs: 50")
-print("  Early stopping patience: 10")
-
-# Train model
-print("\nTraining TFT model...")
-trainer.fit(
-    tft,
-    train_dataloaders=train_dataloader,
-    val_dataloaders=val_dataloader,
-)
-
-print("\n✓ TFT model training completed")
-
-# %% [markdown]
-# ### Generate TFT Predictions on Training Set
-
-# %%
-print("\nGenerating TFT predictions on training set...")
-
-# Get predictions
-tft_predictions = tft.predict(val_dataloader, mode='prediction', return_x=True)
-
-# Extract predictions and actuals
-tft_pred_values = tft_predictions.output.detach().cpu().numpy().flatten()
-tft_actual_values = []
-
-for batch in val_dataloader:
-    tft_actual_values.extend(batch[1][0][:, 0].detach().cpu().numpy())
-
-tft_actual_values = np.array(tft_actual_values)
-
-# Create series with proper indices
-tft_pred_series = pd.Series(
-    tft_pred_values[:len(tft_actual_values)],
-    index=tft_train_data[tft_train_data['time_idx'] > training_cutoff]['Date'].values[:len(tft_actual_values)]
-)
-
-tft_actual_series = pd.Series(
-    tft_actual_values,
-    index=tft_train_data[tft_train_data['time_idx'] > training_cutoff]['Date'].values[:len(tft_actual_values)]
-)
-
-# Calculate metrics (convert to variance scale)
-tft_pred_var = np.exp(tft_pred_series)
-tft_actual_var = np.exp(tft_actual_series)
-
-tft_qlike = Metric_Evaluation.qlike(tft_actual_var, tft_pred_var)
-tft_mspe = Metric_Evaluation.mspe(tft_actual_var, tft_pred_var)
-
-print(f"\n{'='*60}")
-print("TFT MODEL PERFORMANCE (Validation Set)")
-print(f"{'='*60}")
-print(f"QLIKE Mean: {tft_qlike.mean():.4f} ± {tft_qlike.std():.4f}")
-print(f"MSPE Mean:  {tft_mspe.mean():.4f} ± {tft_mspe.std():.4f}")
-print(f"{'='*60}")
-
-# Add TFT results to report
-report.add_section("Temporal Fusion Transformer (TFT) Results", level=2)
-report.add_text("""
-The Temporal Fusion Transformer is a state-of-the-art deep learning architecture
-for multi-horizon time series forecasting. It combines:
-
-- **Multi-head attention mechanism**: Captures complex temporal dependencies
-- **Variable selection networks**: Automatic feature importance learning
-- **Gated residual networks**: Non-linear processing with skip connections
-- **Quantile forecasting**: Provides prediction intervals
-
-**TFT Architecture Details:**
-- Hidden size: 64
-- Attention heads: 4
-- Encoder length: 22 days (monthly lookback)
-- Dropout: 0.1 (regularization)
-- Early stopping: Patience of 10 epochs
-""")
-
-tft_metrics = {
-    "QLIKE Mean": tft_qlike.mean(),
-    "QLIKE Std": tft_qlike.std(),
-    "MSPE Mean": tft_mspe.mean(),
-    "MSPE Std": tft_mspe.std(),
-    "Training Samples": len(training_tft),
-    "Validation Samples": len(validation_tft)
-}
-report.add_metrics_summary(tft_metrics, title="TFT Model Performance (Validation Set)")
-
-print("\n✓ TFT results added to report")
-
-# %% [markdown]
-# ### Comprehensive Model Comparison
-
-# %%
-print("\n" + "="*80)
-print("COMPREHENSIVE MODEL COMPARISON")
-print("="*80)
-
-# Collect all model results (using training set metrics where available)
-all_models_comparison = []
-
-# Add HAR and HARX ensemble results (from earlier analysis)
-# Note: These need to be extracted from the earlier training results
-# For now, we'll use placeholder values - you should replace with actual values
-
-print("\nCompiling all model results...")
-
-# Note: Replace these with actual values from your training results
-har_504_qlike = 0.5234  # Placeholder - replace with actual value
-har_504_mspe = 0.0156   # Placeholder - replace with actual value
-
-harx_756_qlike = 0.5189  # Placeholder - replace with actual value  
-harx_756_mspe = 0.0151   # Placeholder - replace with actual value
-
-all_models_comparison.append({
-    'Model': 'HAR (w=504)',
-    'Type': 'Statistical',
-    'QLIKE_mean': har_504_qlike,
-    'MSPE_mean': har_504_mspe,
-    'Rank': 0
-})
-
-all_models_comparison.append({
-    'Model': 'HAR-X (w=756)',
-    'Type': 'Statistical',
-    'QLIKE_mean': harx_756_qlike,
-    'MSPE_mean': harx_756_mspe,
-    'Rank': 0
-})
-
-# Add ML models
-for model_name in ml_model_types:
-    all_models_comparison.append({
-        'Model': model_name.upper(),
-        'Type': 'Machine Learning',
-        'QLIKE_mean': ml_ensemble_results[model_name]['qlike_mean'],
-        'MSPE_mean': ml_ensemble_results[model_name]['mspe_mean'],
-        'Rank': 0
-    })
-
-# Add TFT
-all_models_comparison.append({
-    'Model': 'TFT',
-    'Type': 'Deep Learning',
-    'QLIKE_mean': tft_qlike.mean(),
-    'MSPE_mean': tft_mspe.mean(),
-    'Rank': 0
-})
-
-# Create comparison dataframe
-comparison_df = pd.DataFrame(all_models_comparison)
-
-# Rank by QLIKE (lower is better)
-comparison_df = comparison_df.sort_values('QLIKE_mean')
-comparison_df['Rank'] = range(1, len(comparison_df) + 1)
-comparison_df = comparison_df[['Rank', 'Model', 'Type', 'QLIKE_mean', 'MSPE_mean']]
-
-print("\n" + "="*80)
-print("MODEL RANKING BY QLIKE (Lower is Better)")
-print("="*80)
-print(comparison_df.to_string(index=False))
-print("="*80)
-
-# Add to report
-report.add_section("Comprehensive Model Comparison", level=2)
-report.add_text("""
-This section compares all implemented models across different paradigms:
-- **Statistical Models**: HAR and HAR-X
-- **Machine Learning Models**: Random Forest, GBM, XGBoost, LightGBM, CatBoost
-- **Deep Learning**: Temporal Fusion Transformer
-
-All models are ranked by QLIKE (Quasi-Likelihood) metric, where lower values
-indicate better forecast calibration.
-""")
-
-report.add_table(comparison_df.round(4), caption="Table 14: Comprehensive Model Comparison (Ranked by QLIKE)")
-
-# Create visualization
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
-
-# QLIKE comparison
-comparison_df.plot(x='Model', y='QLIKE_mean', kind='bar', ax=ax1, legend=False, color='steelblue')
-ax1.set_title('Model Comparison: QLIKE (Lower is Better)', fontsize=14, fontweight='bold')
-ax1.set_xlabel('Model', fontsize=12)
-ax1.set_ylabel('QLIKE Mean', fontsize=12)
-ax1.tick_params(axis='x', rotation=45)
-ax1.grid(axis='y', alpha=0.3)
-
-# MSPE comparison
-comparison_df.plot(x='Model', y='MSPE_mean', kind='bar', ax=ax2, legend=False, color='coral')
-ax2.set_title('Model Comparison: MSPE (Lower is Better)', fontsize=14, fontweight='bold')
-ax2.set_xlabel('Model', fontsize=12)
-ax2.set_ylabel('MSPE Mean', fontsize=12)
-ax2.tick_params(axis='x', rotation=45)
-ax2.grid(axis='y', alpha=0.3)
-
-plt.tight_layout()
-report.save_and_add_plot(fig, "comprehensive_model_comparison", 
-                        caption="Figure: Comprehensive Model Comparison (QLIKE and MSPE)")
-plt.close()
-
-print("\n✓ Comprehensive comparison completed and added to report")
-
-# %% [markdown]
-# ### Key Findings and Recommendations
-
-# %%
-report.add_section("Key Findings from ML/DL Models", level=3)
-
-best_model = comparison_df.iloc[0]
-best_ml_model = comparison_df[comparison_df['Type'] == 'Machine Learning'].iloc[0]
-
-report.add_text(f"""
-### Main Findings:
-
-**1. Best Overall Model:**
-- **{best_model['Model']}** achieves the lowest QLIKE: {best_model['QLIKE_mean']:.4f}
-- Model type: {best_model['Type']}
-- MSPE: {best_model['MSPE_mean']:.4f}
-
-**2. Best Machine Learning Model:**
-- **{best_ml_model['Model']}** performs best among traditional ML approaches
-- QLIKE: {best_ml_model['QLIKE_mean']:.4f}
-- MSPE: {best_ml_model['MSPE_mean']:.4f}
-
-**3. Model Paradigm Comparison:**
-- Statistical models (HAR/HARX) provide strong baseline performance
-- Machine learning models offer competitive results with automatic feature learning
-- Deep learning (TFT) excels at capturing complex temporal patterns
-
-**4. Practical Recommendations:**
-- For **production deployment**: Use ensemble of top 3 models for robustness
-- For **interpretability**: Prefer HAR-X or tree-based models (RF, XGBoost)
-- For **accuracy**: Consider TFT if computational resources permit
-- For **speed**: LightGBM offers best speed-accuracy tradeoff
-
-**5. Feature Importance:**
-- All models benefit from HAR components (daily, weekly, monthly lags)
-- Exogenous variables provide marginal but consistent improvement
-- TFT's attention mechanism automatically identifies relevant features
-""")
-
-print("\n" + "="*80)
-print("✓ ML/DL IMPLEMENTATION COMPLETED SUCCESSFULLY")
-print("="*80)
-print("\nSummary:")
-print(f"  • Trained {len(ml_model_types)} traditional ML models")
-print(f"  • Implemented and trained TFT deep learning model")
-print(f"  • Compared {len(comparison_df)} models total")
-print(f"  • Best model: {best_model['Model']} (QLIKE: {best_model['QLIKE_mean']:.4f})")
-print("="*80)
-
 # %% [markdown]
 # ## 📊 How to Use the Generated Report
 # 
