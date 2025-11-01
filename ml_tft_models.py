@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from datetime import datetime
 import os
+import yfinance as yf
 
 # ML model imports
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -133,23 +134,85 @@ def load_data():
     print("="*80)
     
     data_dir = Path("./data")
-    
-    # Load TLT OHLC data
-    print("Loading TLT OHLC data...", end=" ")
-    tlt_ohlc = pd.read_csv(data_dir / "TLT_2007-01-01_to_2025-08-30.csv")
-    tlt_ohlc['Date'] = pd.to_datetime(tlt_ohlc['Date'])
-    tlt_ohlc = tlt_ohlc.set_index('Date')
-    
-    # Create proper OHLC columns (the CSV has Price instead of Open/Close)
-    # Assuming Price is Close price
-    tlt_ohlc = tlt_ohlc.rename(columns={'Price': 'Close'})
-    
-    # For Open, we'll use previous Close (shifted by 1)
-    tlt_ohlc['Open'] = tlt_ohlc['Close'].shift(1)
-    
-    # Filter to match the date range used in stat_model_r6.py
-    tlt_ohlc = tlt_ohlc.loc[:'2024-12-30']
-    print(f"✓ {tlt_ohlc.shape}")
+
+    # Load TLT OHLC data: prefer local CSV, fallback to yfinance if required columns missing
+    csv_path = data_dir / "TLT_2007-01-01_to_2025-08-30.csv"
+    required_cols = {"Open", "High", "Low", "Close"}
+    if csv_path.exists():
+        try:
+            print(f"Loading TLT OHLC data from CSV ({csv_path})...", end=" ")
+            tlt_ohlc = pd.read_csv(csv_path)
+            # Accept common date column names
+            if 'Date' in tlt_ohlc.columns:
+                tlt_ohlc['Date'] = pd.to_datetime(tlt_ohlc['Date'])
+                tlt_ohlc = tlt_ohlc.set_index('Date')
+            elif 'date' in tlt_ohlc.columns:
+                tlt_ohlc['date'] = pd.to_datetime(tlt_ohlc['date'])
+                tlt_ohlc = tlt_ohlc.set_index('date')
+            # If CSV provides a single 'Price' column, treat as Close
+            if 'Price' in tlt_ohlc.columns and 'Close' not in tlt_ohlc.columns:
+                tlt_ohlc = tlt_ohlc.rename(columns={'Price': 'Close'})
+            # If Close exists but Open missing, create Open from previous Close
+            if 'Close' in tlt_ohlc.columns and 'Open' not in tlt_ohlc.columns:
+                tlt_ohlc['Open'] = tlt_ohlc['Close'].shift(1)
+            # Check for required OHLC columns; otherwise fallback to yfinance
+            missing_required = required_cols.difference(tlt_ohlc.columns)
+            if missing_required:
+                print(f"✗ missing columns {missing_required}; falling back to yfinance")
+                csv_path = None
+            else:
+                tlt_ohlc = tlt_ohlc.sort_index()
+                tlt_ohlc = tlt_ohlc.loc[:'2024-12-30']
+                print(f"✓ {tlt_ohlc.shape}")
+        except Exception as e:
+            print(f"✗ CSV load failed ({e}), falling back to yfinance")
+            csv_path = None
+    else:
+        csv_path = None
+
+    if csv_path is None:
+        print("Downloading TLT OHLC data from Yahoo Finance...", end=" ")
+        try:
+            start_date = "2007-01-01"
+            end_date = "2025-08-30"
+            tlt_df = yf.download(
+                "TLT",
+                start=start_date,
+                end=end_date,
+                progress=False,
+                auto_adjust=False,
+                group_by="ticker"
+            )
+            if tlt_df.empty:
+                raise RuntimeError("Yahoo Finance returned an empty dataframe for TLT")
+
+            # Handle possible MultiIndex columns (e.g., ('TLT', 'Open'))
+            if isinstance(tlt_df.columns, pd.MultiIndex):
+                if 'Ticker' in tlt_df.columns.names:
+                    tlt_df = tlt_df.droplevel('Ticker', axis=1)
+                else:
+                    tlt_df = tlt_df.droplevel(0, axis=1)
+
+            tlt_df.index.name = 'Date'
+            tlt_ohlc = tlt_df.copy()
+
+            # yfinance sometimes names adjusted close differently
+            if 'Close' not in tlt_ohlc.columns and 'Adj Close' in tlt_ohlc.columns:
+                tlt_ohlc = tlt_ohlc.rename(columns={'Adj Close': 'Close'})
+
+            missing_required = required_cols.difference(tlt_ohlc.columns)
+            if missing_required:
+                raise RuntimeError(f"Yahoo Finance data missing columns {missing_required}")
+
+            # If Open missing, create from previous Close
+            if 'Open' not in tlt_ohlc.columns and 'Close' in tlt_ohlc.columns:
+                tlt_ohlc['Open'] = tlt_ohlc['Close'].shift(1)
+
+            tlt_ohlc = tlt_ohlc.sort_index()
+            tlt_ohlc = tlt_ohlc.loc[:'2024-12-30']
+            print(f"✓ {tlt_ohlc.shape}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load TLT data from CSV and yfinance: {e}")
     
     # Compute volatility estimators using the same method as stat_model_r6.py
     print("Computing volatility estimators...", end=" ")
@@ -748,235 +811,7 @@ def prepare_tft_data(vol_data, exo_data, y_true, max_encoder_length=22, max_pred
     return df_combined
 
 
-# %%
-def train_tft_model(train_x, train_y, exo_train, report):
-    """
-    Train Temporal Fusion Transformer model.
-    
-    Parameters:
-    -----------
-    train_x : pd.DataFrame
-        Volatility estimators
-    train_y : pd.Series
-        Target variable
-    exo_harx_train : pd.DataFrame
-        Exogenous variables
-    Metric_Evaluation : class
-        Metrics evaluation class
-    report : VolatilityReportGenerator
-        Report generator instance
-        
-    Returns:
-    --------
-    tuple : (tft_qlike, tft_mspe, tft_pred_var, tft_actual_var)
-    """
-    print("\n" + "="*80)
-    print("IMPLEMENTING TEMPORAL FUSION TRANSFORMER (TFT)")
-    print("="*80)
-    
-    exo_cols = ['UST10Y', 'HYOAS', 'TermSpread_10Y_2Y', 'VIX', 'Breakeven10Y']
-    estimators = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']
-    
-    # Prepare data for TFT
-    print("Preparing TFT dataset...")
-    tft_train_data = prepare_tft_data(
-        vol_data=train_x[estimators],
-        exo_data=exo_train[exo_cols],
-        y_true=train_y,
-        max_encoder_length=22,
-        max_prediction_length=1
-    )
-    
-    print(f"✓ TFT training data prepared: {tft_train_data.shape}")
-    print(f"  Columns: {list(tft_train_data.columns)}")
-    print(f"  Date range: {tft_train_data['Date'].min()} to {tft_train_data['Date'].max()}")
-    
-    # Define validation split (last 20% of training data)
-    training_cutoff = tft_train_data['time_idx'].max() - int(0.2 * len(tft_train_data))
-    
-    # Time-varying features (change over time)
-    time_varying_known_reals = exo_cols  # Exogenous variables
-    time_varying_unknown_reals = estimators + ['target']
-    
-    print(f"Training cutoff: {training_cutoff}")
-    print(f"Time-varying known reals: {time_varying_known_reals}")
-    print(f"Time-varying unknown reals: {time_varying_unknown_reals}")
-    
-    # Create TimeSeriesDataSet
-    training_tft = TimeSeriesDataSet(
-        tft_train_data[tft_train_data['time_idx'] <= training_cutoff],
-        time_idx='time_idx',
-        target='target',
-        group_ids=['group'],
-        min_encoder_length=60,  # Increased from 22 for better long-term patterns
-        max_encoder_length=90,  # Increased from 22
-        min_prediction_length=1,
-        max_prediction_length=1,
-        time_varying_known_reals=time_varying_known_reals,
-        time_varying_unknown_reals=time_varying_unknown_reals,
-        target_normalizer=None,  # Remove normalization to keep predictions on log scale
-        add_relative_time_idx=True,
-        add_target_scales=True,
-        add_encoder_length=True,
-    )
-    
-    # Create validation dataset
-    validation_tft = TimeSeriesDataSet.from_dataset(
-        training_tft,
-        tft_train_data,
-        predict=False,
-        stop_randomization=True
-    )
-    
-    # Create dataloaders
-    batch_size = 64
-    train_dataloader = training_tft.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
-    val_dataloader = validation_tft.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
-    
-    print(f"✓ TFT datasets created")
-    print(f"  Training samples: {len(training_tft)}")
-    print(f"  Validation samples: {len(validation_tft)}")
-    print(f"  Batch size: {batch_size}")
-    
-    # Configure TFT model
-    print("\n" + "="*60)
-    print("TRAINING TEMPORAL FUSION TRANSFORMER")
-    print("="*60)
-    
-    tft = TemporalFusionTransformer.from_dataset(
-        training_tft,
-        learning_rate=0.01,  # Increased learning rate for faster convergence
-        hidden_size=128,     # Increased hidden size for better capacity
-        attention_head_size=8,  # Increased attention heads
-        dropout=0.2,         # Slightly increased dropout for regularization
-        hidden_continuous_size=64,  # Increased continuous size
-        output_size=3,       # Multiple quantiles
-        loss=QuantileLoss(quantiles=[0.1, 0.5, 0.9]),  # Multiple quantiles (10th, 50th, 90th percentiles)
-        log_interval=10,
-        reduce_on_plateau_patience=4,
-    )
-    
-    print(f"✓ TFT model configured")
-    print(f"  Hidden size: 128")
-    print(f"  Attention heads: 8")
-    print(f"  Dropout: 0.2")
-    print(f"  Loss quantiles: {tft.loss.quantiles}")
-    print(f"  Output: Multiple quantiles (0.1, 0.5, 0.9)")
-    
-    # Configure trainer
-    early_stop_callback = EarlyStopping(
-        monitor='val_loss',
-        min_delta=1e-4,
-        patience=10,
-        verbose=False,
-        mode='min'
-    )
-    
-    trainer = Trainer(
-        max_epochs=50,
-        accelerator='auto',
-        enable_model_summary=True,
-        gradient_clip_val=0.1,
-        callbacks=[early_stop_callback],
-        enable_progress_bar=True,
-        enable_checkpointing=False,
-        logger=False,
-    )
-    
-    print("✓ Trainer configured")
-    print("  Max epochs: 50")
-    print("  Early stopping patience: 10")
-    
-    # Train model
-    print("\nTraining TFT model...")
-    trainer.fit(
-        tft,
-        train_dataloaders=train_dataloader,
-        val_dataloaders=val_dataloader,
-    )
-    
-    print("\n✓ TFT model training completed")
-    
-    # Generate predictions
-    print("\nGenerating TFT predictions on training set...")
-    tft_predictions = tft.predict(val_dataloader, mode='prediction', return_x=True)
-    
-    # Debug: Check the shape of predictions
-    pred_array = tft_predictions.output.detach().cpu().numpy()
-    print(f"  Prediction shape: {pred_array.shape}")
-    
-    # Extract predictions (handle both single and multiple quantiles)
-    if pred_array.ndim == 2 and pred_array.shape[1] == 3:
-        # Multiple quantiles: [samples, 3]
-        tft_pred_values = pred_array[:, 1]  # Index 1 is the 0.5 quantile (median)
-        tft_pred_q10 = pred_array[:, 0]     # 0.1 quantile (lower bound)
-        tft_pred_q90 = pred_array[:, 2]     # 0.9 quantile (upper bound)
-        print(f"  Using median (0.5 quantile) for evaluation")
-    elif pred_array.ndim == 2 and pred_array.shape[1] == 1:
-        # Single output (possibly collapsed quantiles for single-step)
-        tft_pred_values = pred_array[:, 0]
-        tft_pred_q10 = None  # No prediction intervals available
-        tft_pred_q90 = None
-        print(f"  Single output detected - no prediction intervals available")
-    else:
-        raise ValueError(f"Unexpected prediction shape: {pred_array.shape}")
-    
-    print(f"  Extracted {len(tft_pred_values)} predictions")
-    
-    tft_actual_values = []
-    
-    for batch in val_dataloader:
-        tft_actual_values.extend(batch[1][0][:, 0].detach().cpu().numpy())
-    
-    tft_actual_values = np.array(tft_actual_values)
-    print(f"  Extracted {len(tft_actual_values)} actual values")
-    
-    # Create series with proper indices
-    # Get the validation dates
-    validation_data = tft_train_data[tft_train_data['time_idx'] > training_cutoff].reset_index(drop=True)
-    n_samples = min(len(tft_pred_values), len(tft_actual_values), len(validation_data))
-    
-    print(f"  Using {n_samples} samples for evaluation")
-    print(f"  Validation data length: {len(validation_data)}")
-    print(f"  Predictions length: {len(tft_pred_values)}")
-    print(f"  Actual values length: {len(tft_actual_values)}")
-    
-    # Use simple integer index for now to avoid mismatch
-    tft_pred_series = pd.Series(
-        tft_pred_values[:n_samples],
-        index=range(n_samples)
-    )
-    
-    tft_actual_series = pd.Series(
-        tft_actual_values[:n_samples],
-        index=range(n_samples)
-    )
-    
-    # Calculate metrics (convert to variance scale)
-    tft_pred_var = np.exp(tft_pred_series)
-    tft_actual_var = np.exp(tft_actual_series)
-    
-    # Filter out extreme values that cause MSPE explosion
-    # Keep only reasonable variance values (> 1e-8 to avoid division by near-zero)
-    valid_mask = (tft_actual_var > 1e-8) & (tft_pred_var > 1e-8) & np.isfinite(tft_actual_var) & np.isfinite(tft_pred_var)
-    
-    tft_qlike = Metric_Evaluation.qlike(tft_actual_var[valid_mask], tft_pred_var[valid_mask])
-    tft_mspe = Metric_Evaluation.mspe(tft_actual_var[valid_mask], tft_pred_var[valid_mask])
-    
-    print(f"\n{'='*60}")
-    print("TFT MODEL PERFORMANCE (Validation Set)")
-    print(f"{'='*60}")
-    print(f"QLIKE Mean: {tft_qlike.mean():.4f} ± {tft_qlike.std():.4f}")
-    print(f"MSPE Mean:  {tft_mspe.mean():.4f} ± {tft_mspe.std():.4f}")
-    print(f"{'='*60}")
-    
-    # Add TFT results to report
-    add_tft_results_to_report(tft_qlike, tft_mspe, tft_pred_var, tft_actual_var, 
-                               tft_pred_series, tft_actual_series, 
-                               len(training_tft), len(validation_tft), report, plt,
-                               tft_pred_q10, tft_pred_q90)
-    
-    return tft_qlike, tft_mspe, tft_pred_var, tft_actual_var
+
 
 
 # %%
@@ -1260,73 +1095,6 @@ indicate better forecast calibration.
 # %% [markdown]
 # ## Main Execution Function
 
-# %%
-def run_ml_tft_analysis(train_x, train_y, exo_train, report):
-    """
-    Main function to run all ML and TFT analysis.
-    
-    Parameters:
-    -----------
-    train_x : pd.DataFrame
-        Volatility estimators
-    train_y : pd.Series
-        Target variable
-    exo_harx_train : pd.DataFrame
-        Exogenous variables
-    HAR_Model : class
-        HAR model class
-    Metric_Evaluation : class
-        Metrics evaluation class
-    EnsembleModel : class
-        Ensemble model class
-    report : VolatilityReportGenerator
-        Report generator instance
-        
-    Returns:
-    --------
-    dict : Dictionary containing all results
-    """
-    # Train ML models
-    ml_results, ml_training_times, estimators, ml_model_types, feature_matrices = train_ml_models(
-        train_x, train_y, exo_train, report
-    )
-    
-    # Create ML ensembles
-    ml_ensemble_results = create_ml_ensembles(
-        ml_models=ml_results, 
-        features=feature_matrices, 
-        target=train_y, 
-        report=report, 
-        ml_model_types=ml_model_types, 
-        vol_estimators=estimators
-    )
-    
-    # Add ML results to report
-    model_params = {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05}
-    add_ml_results_to_report(
-        ml_ensemble_results, ml_training_times, ml_model_types, 
-        model_params, report
-    )
-    
-    # Train TFT model
-    tft_qlike, tft_mspe, tft_pred_var, tft_actual_var = train_tft_model(
-        train_x, train_y, exo_train, report
-    )
-    
-    # Create comprehensive comparison
-    create_comprehensive_comparison(
-        ml_ensemble_results, ml_model_types, tft_qlike, tft_mspe, report, plt
-    )
-    
-    return {
-        'ml_results': ml_results,
-        'ml_training_times': ml_training_times,
-        'ml_ensemble_results': ml_ensemble_results,
-        'tft_qlike': tft_qlike,
-        'tft_mspe': tft_mspe,
-        'tft_pred_var': tft_pred_var,
-        'tft_actual_var': tft_actual_var
-    }
 
 
 # %% [markdown]
@@ -1335,38 +1103,286 @@ def run_ml_tft_analysis(train_x, train_y, exo_train, report):
 # Run this to execute the complete ML/TFT analysis
 
 # %%
-if __name__ == "__main__":
-    # Load all data
-    data = load_data()
-    
-    # Create report generator
-    report = VolatilityReportGenerator(report_name="volatility_forecast_report", append=True)
-    
-    print("\n" + "="*80)
-    print("STARTING ML/TFT ANALYSIS")
-    print("="*80)
-    
-    # Run complete analysis
-    results = run_ml_tft_analysis(
-        train_x=data['train_x'],
-        train_y=data['train_y'],
-        exo_train=data['train_exo'],
-        report=report
-    )
-    
-    # Finalize report
-    report.finalize_report()
-    
-    print("\n" + "="*80)
-    print("✓ ANALYSIS COMPLETE!")
-    print("="*80)
-    print(f"\nResults summary:")
-    print(f"  • ML models trained: {len(results['ml_training_times'])}")
-    print(f"  • TFT model trained: ✓")
-    print(f"  • TFT QLIKE: {results['tft_qlike'].mean():.4f}")
-    print(f"  • TFT MSPE: {results['tft_mspe'].mean():.4f}")
-    print(f"\nReport saved to: {report.report_file}")
-    print("="*80)
+
+data = load_data()
+
+# %%
+
+# Create report generator
+report = VolatilityReportGenerator(report_name="volatility_forecast_report", append=True)
+
+# %%
+
+print("\n" + "="*80)
+print("STARTING ML/TFT ANALYSIS")
+print("="*80)
+
+# Run complete analysis (inlined from run_ml_tft_analysis)
+# Train ML models
+ml_results, ml_training_times, estimators, ml_model_types, feature_matrices = train_ml_models(
+    data['train_x'], data['train_y'], data['train_exo'], report
+)
+
+# %%
+
+# Create ML ensembles
+ml_ensemble_results = create_ml_ensembles(
+    ml_models=ml_results,
+    features=feature_matrices,
+    target=data['train_y'],
+    report=report,
+    ml_model_types=ml_model_types,
+    vol_estimators=estimators
+)
+
+# %%
+
+# Add ML results to report
+model_params = {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05}
+add_ml_results_to_report(
+    ml_ensemble_results, ml_training_times, ml_model_types,
+    model_params, report
+)
+
+# Train TFT model (inlined from train_tft_model)
+print("\n" + "="*80)
+print("IMPLEMENTING TEMPORAL FUSION TRANSFORMER (TFT)")
+print("="*80)
+# %%
+
+exo_cols = ['UST10Y', 'HYOAS', 'TermSpread_10Y_2Y', 'VIX', 'Breakeven10Y']
+estimators = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']
+# %%
+
+# Prepare data for TFT
+print("Preparing TFT dataset...")
+tft_train_data = prepare_tft_data(
+    vol_data=data['train_x'][estimators],
+    exo_data=data['train_exo'][exo_cols],
+    y_true=data['train_y'],
+    max_encoder_length=22,
+    max_prediction_length=1
+)
+# %%
+print(f"✓ TFT training data prepared: {tft_train_data.shape}")
+print(f"  Columns: {list(tft_train_data.columns)}")
+print(f"  Date range: {tft_train_data['Date'].min()} to {tft_train_data['Date'].max()}")
+# %%
+# Define validation split (last 20% of training data)
+training_cutoff = tft_train_data['time_idx'].max() - int(0.2 * len(tft_train_data))
+
+# Time-varying features (change over time)
+time_varying_known_reals = exo_cols  # Exogenous variables
+time_varying_unknown_reals = estimators + ['target']
+
+print(f"Training cutoff: {training_cutoff}")
+print(f"Time-varying known reals: {time_varying_known_reals}")
+print(f"Time-varying unknown reals: {time_varying_unknown_reals}")
+
+# Create TimeSeriesDataSet
+training_tft = TimeSeriesDataSet(
+    tft_train_data[tft_train_data['time_idx'] <= training_cutoff],
+    time_idx='time_idx',
+    target='target',
+    group_ids=['group'],
+    min_encoder_length=60,  # Increased from 22 for better long-term patterns
+    max_encoder_length=90,  # Increased from 22
+    min_prediction_length=1,
+    max_prediction_length=1,
+    time_varying_known_reals=time_varying_known_reals,
+    time_varying_unknown_reals=time_varying_unknown_reals,
+    target_normalizer=None,  # Remove normalization to keep predictions on log scale
+    add_relative_time_idx=True,
+    add_target_scales=True,
+    add_encoder_length=True,
+)
+
+# Create validation dataset
+validation_tft = TimeSeriesDataSet.from_dataset(
+    training_tft,
+    tft_train_data[tft_train_data['time_idx'] > training_cutoff],
+    predict=False,
+    stop_randomization=True
+)
+
+# Create dataloaders
+batch_size = 64
+train_dataloader = training_tft.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
+val_dataloader = validation_tft.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
+
+print(f"✓ TFT datasets created")
+print(f"  Training samples: {len(training_tft)}")
+print(f"  Validation samples: {len(validation_tft)}")
+print(f"  Batch size: {batch_size}")
+# %%
+# Configure TFT model
+print("\n" + "="*60)
+print("TRAINING TEMPORAL FUSION TRANSFORMER")
+print("="*60)
+
+tft = TemporalFusionTransformer.from_dataset(
+    training_tft,
+    learning_rate=0.01,  # Increased learning rate for faster convergence
+    hidden_size=1024,     # Increased hidden size for better capacity
+    attention_head_size=16,  # Increased attention heads
+    dropout=0.2,         # Slightly increased dropout for regularization
+    hidden_continuous_size=64,  # Increased continuous size
+    output_size=7,       # Multiple quantiles
+    loss=QuantileLoss(quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]),  # More quantiles for better uncertainty estimation
+    log_interval=10,
+    reduce_on_plateau_patience=4,
+)
+
+print(f"✓ TFT model configured")
+print(f"  Hidden size: 128")
+print(f"  Attention heads: 8")
+print(f"  Dropout: 0.2")
+print(f"  Loss quantiles: {tft.loss.quantiles}")
+print(f"  Output: Multiple quantiles (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)")
+
+# Configure trainer
+early_stop_callback = EarlyStopping(
+    monitor='val_loss',
+    min_delta=1e-4,
+    patience=20,
+    verbose=False,
+    mode='min'
+)
+# %%
+trainer = Trainer(
+    max_epochs=500,
+    accelerator='auto',
+    enable_model_summary=True,
+    gradient_clip_val=0.1,
+    callbacks=[early_stop_callback],
+    enable_progress_bar=True,
+    enable_checkpointing=False,
+    logger=False,
+)
+
+print("✓ Trainer configured")
+print("  Max epochs: 50")
+print("  Early stopping patience: 10")
+# %%
+# Train model
+print("\nTraining TFT model...")
+trainer.fit(
+    tft,
+    train_dataloaders=train_dataloader,
+    val_dataloaders=val_dataloader,
+)
+
+print("\n✓ TFT model training completed")
+# %%
+# Generate predictions
+print("\nGenerating TFT predictions on training set...")
+tft_predictions = tft.predict(val_dataloader, mode='prediction', return_x=True)
+
+# Debug: Check the shape of predictions
+pred_array = tft_predictions.output.detach().cpu().numpy()
+print(f"  Prediction shape: {pred_array.shape}")
+
+# Extract predictions (handle both single and multiple quantiles)
+if pred_array.ndim == 2 and pred_array.shape[1] == 7:
+    # Multiple quantiles: [samples, 7] for [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+    tft_pred_values = pred_array[:, 3]  # Index 3 is the 0.5 quantile (median)
+    tft_pred_q10 = pred_array[:, 1]     # 0.1 quantile (lower bound)
+    tft_pred_q90 = pred_array[:, 5]     # 0.9 quantile (upper bound)
+    print(f"  Using median (0.5 quantile) for evaluation")
+elif pred_array.ndim == 2 and pred_array.shape[1] == 1:
+    # Single output (possibly collapsed quantiles for single-step)
+    tft_pred_values = pred_array[:, 0]
+    tft_pred_q10 = None  # No prediction intervals available
+    tft_pred_q90 = None
+    print(f"  Single output detected - no prediction intervals available")
+else:
+    raise ValueError(f"Unexpected prediction shape: {pred_array.shape}")
+
+print(f"  Extracted {len(tft_pred_values)} predictions")
+
+tft_actual_values = []
+
+for batch in val_dataloader:
+    tft_actual_values.extend(batch[1][0][:, 0].detach().cpu().numpy())
+
+tft_actual_values = np.array(tft_actual_values)
+print(f"  Extracted {len(tft_actual_values)} actual values")
+
+# Create series with proper indices
+# Get the validation dates
+validation_data = tft_train_data[tft_train_data['time_idx'] > training_cutoff].reset_index(drop=True)
+n_samples = min(len(tft_pred_values), len(tft_actual_values), len(validation_data))
+
+print(f"  Using {n_samples} samples for evaluation")
+print(f"  Validation data length: {len(validation_data)}")
+print(f"  Predictions length: {len(tft_pred_values)}")
+print(f"  Actual values length: {len(tft_actual_values)}")
+
+# Use simple integer index for now to avoid mismatch
+tft_pred_series = pd.Series(
+    tft_pred_values[:n_samples],
+    index=range(n_samples)
+)
+
+tft_actual_series = pd.Series(
+    tft_actual_values[:n_samples],
+    index=range(n_samples)
+)
+
+# Calculate metrics (convert to variance scale)
+tft_pred_var = np.exp(tft_pred_series)
+tft_actual_var = np.exp(tft_actual_series)
+
+# Filter out extreme values that cause MSPE explosion
+# Keep only reasonable variance values (> 1e-8 to avoid division by near-zero)
+valid_mask = (tft_actual_var > 1e-8) & (tft_pred_var > 1e-8) & np.isfinite(tft_actual_var) & np.isfinite(tft_pred_var)
+
+tft_qlike = Metric_Evaluation.qlike(tft_actual_var[valid_mask], tft_pred_var[valid_mask])
+tft_mspe = Metric_Evaluation.mspe(tft_actual_var[valid_mask], tft_pred_var[valid_mask])
+
+print(f"\n{'='*60}")
+print("TFT MODEL PERFORMANCE (Validation Set)")
+print(f"{'='*60}")
+print(f"QLIKE Mean: {tft_qlike.mean():.4f} ± {tft_qlike.std():.4f}")
+print(f"MSPE Mean:  {tft_mspe.mean():.4f} ± {tft_mspe.std():.4f}")
+print(f"{'='*60}")
+
+# Add TFT results to report
+add_tft_results_to_report(tft_qlike, tft_mspe, tft_pred_var, tft_actual_var, 
+                           tft_pred_series, tft_actual_series, 
+                           len(training_tft), len(validation_tft), report, plt,
+                           tft_pred_q10, tft_pred_q90)
+
+# Create comprehensive comparison
+create_comprehensive_comparison(
+    ml_ensemble_results, ml_model_types, tft_qlike, tft_mspe, report, plt
+)
+
+results = {
+    'ml_results': ml_results,
+    'ml_training_times': ml_training_times,
+    'ml_ensemble_results': ml_ensemble_results,
+    'tft_qlike': tft_qlike,
+    'tft_mspe': tft_mspe,
+    'tft_pred_var': tft_pred_var,
+    'tft_actual_var': tft_actual_var
+}
+
+# %%
+
+# Finalize report
+report.finalize_report()
+
+print("\n" + "="*80)
+print("✓ ANALYSIS COMPLETE!")
+print("="*80)
+print(f"\nResults summary:")
+print(f"  • ML models trained: {len(results['ml_training_times'])}")
+print(f"  • TFT model trained: ✓")
+print(f"  • TFT QLIKE: {results['tft_qlike'].mean():.4f}")
+print(f"  • TFT MSPE: {results['tft_mspe'].mean():.4f}")
+print(f"\nReport saved to: {report.report_file}")
+print("="*80)
 
 print("\n✓ ML/TFT module ready to run!")
 print("Execute all cells to run the complete analysis.")
