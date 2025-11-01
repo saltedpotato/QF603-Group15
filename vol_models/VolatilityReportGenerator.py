@@ -113,106 +113,113 @@ class VolatilityReportGeneratorML:
     """
     A comprehensive report generator for volatility forecasting analysis.
     Saves plots and outputs in structured markdown format.
+    Supports sequential model runs with automatic appending and TOC updates.
     """
     
-    def __init__(self, report_name="ml_tft_report", append=False):
+    def __init__(self, report_name="ml_tft_report", append=False, find_latest=True):
+        """
+        Initialize the report generator.
+        
+        Parameters:
+        -----------
+        report_name : str
+            Base name for the report file
+        append : bool
+            If True, find and append to the latest report file
+        find_latest : bool
+            If True and append=False, still look for latest report to continue
+        """
         self.report_name = report_name
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.report_folder = Path(f"report_output_v6")
         self.report_folder.mkdir(exist_ok=True)
         self.image_folder = self.report_folder / "images"
         self.image_folder.mkdir(exist_ok=True)
+        self.run_number = 1
+        self.is_appending = False
         
-        # Find the latest report if in append mode
-        if append:
-            report_files = sorted(self.report_folder.glob(f"{self.report_name}_*.md"), reverse=True)
-            if report_files:
-                self.report_file = report_files[0]
-                print(f"Appending to existing report: {self.report_file}")
-                with open(self.report_file, 'r') as f:
-                    self.report_content = f.read()
-
-                # Define the new TOC entries
-                new_toc_entries = [
-                    "7. [Machine Learning Models Results](#machine-learning-models-results)",
-                    "8. [Temporal Fusion Transformer (TFT) Results](#temporal-fusion-transformer-tft-results)",
-                    "9. [Comprehensive Model Comparison](#comprehensive-model-comparison)"
-                ]
-                
-                # Find the position to insert the new entries (before Conclusions)
-                toc_lines = self.report_content.split('## Table of Contents')[1].split('---')[0].splitlines()
-                
-                # Filter out old entries that will be replaced/renumbered
-                existing_entries = [line for line in toc_lines if line.strip() and not any(new_entry.split('](')[0] in line for new_entry in new_toc_entries)]
-                
-                # Find insertion point
-                insertion_point = -1
-                for i, line in enumerate(existing_entries):
-                    if "conclusions" in line.lower():
-                        insertion_point = i
-                        break
-                if insertion_point == -1:
-                    insertion_point = len(existing_entries) -1 # Fallback to before appendix
-
-                # Combine and renumber
-                final_toc_list = existing_entries[:insertion_point] + new_toc_entries + existing_entries[insertion_point:]
-                
-                # Renumber the whole list
-                renumbered_toc = []
-                for i, line in enumerate(final_toc_list):
-                    if line.strip().startswith(tuple(f"{j}." for j in range(20))):
-                        parts = line.split('.', 1)
-                        renumbered_toc.append(f"{i}.{parts[1]}")
-
-                # Reconstruct the full TOC string
-                new_toc_section = "## Table of Contents\n" + "\n".join(renumbered_toc) + "\n---\n"
-
-                # Replace the old TOC in the report content
-                start_marker = "## Table of Contents"
-                end_marker = "---"
-                start_index = self.report_content.find(start_marker)
-                end_index = self.report_content.find(end_marker, start_index)
-                
-                if start_index != -1 and end_index != -1:
-                    self.report_content = self.report_content[:start_index] + new_toc_section + self.report_content[end_index + len(end_marker):]
-
-                # Add a separator for the new run and convert back to list of lines
-                self.report_content = self.report_content.splitlines(keepends=True)
-                self.add_section(f"New Analysis Run - {self.timestamp}", level=1)
-                return
-
-        # If not appending or no file found, create a new one
-        self.report_file = self.report_folder / f"{self.report_name}_{self.timestamp}.md"
-        self.report_content = []
-        self._init_report()
+        # Try to find and append to latest report
+        report_files = sorted(self.report_folder.glob(f"{self.report_name}_*.md"), reverse=True)
+        
+        if (append or find_latest) and report_files:
+            self.report_file = report_files[0]
+            self.is_appending = True
+            print(f"✓ Appending to existing report: {self.report_file}")
+            
+            # Read existing content
+            with open(self.report_file, 'r') as f:
+                self.report_content = f.read()
+            
+            # Count existing model runs to determine run number
+            self.run_number = self.report_content.count("## Model Run") + 1
+            
+            # Add separator and new run header
+            self._append_new_run()
+        else:
+            # Create a new report
+            self.report_file = self.report_folder / f"{self.report_name}_{self.timestamp}.md"
+            self.report_content = ""
+            self._init_report()
         
     def _init_report(self):
-        """Initialize the markdown report with title"""
+        """Initialize a new markdown report"""
+        report_text = f"""# ML & TFT Models Report
+
+**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+---
+
+## Table of Contents
+
+1. [Model Run 1](#model-run-1)
+
+---
+
+"""
         with open(self.report_file, 'w') as f:
-            f.write(f"# ML & TFT Models Report\n\n")
-            f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"---\n\n")
+            f.write(report_text)
+        self.report_content = report_text
+        self.add_section(f"Model Run {self.run_number}", level=2)
+    
+    def _append_new_run(self):
+        """Append a new model run section to existing report"""
+        # Write updated content to file
+        with open(self.report_file, 'w') as f:
+            f.write(self.report_content)
+        
+        # Add new run section
+        new_run_text = f"\n## Model Run {self.run_number}\n\n"
+        with open(self.report_file, 'a') as f:
+            f.write(new_run_text)
+        
+        # Update in-memory content
+        self.report_content += new_run_text
+        print(f"✓ Started Model Run {self.run_number}")
     
     def add_section(self, title, level=2):
         """Add a section heading"""
+        section_text = f"\n{'#' * level} {title}\n\n"
         with open(self.report_file, 'a') as f:
-            f.write(f"\n{'#' * level} {title}\n\n")
-            self.report_content.append(f"\n{'#' * level} {title}\n\n")
+            f.write(section_text)
+        self.report_content += section_text
     
     def add_text(self, text):
         """Add text content"""
+        text_block = f"{text}\n\n"
         with open(self.report_file, 'a') as f:
-            f.write(f"{text}\n\n")
-            self.report_content.append(f"{text}\n\n")
+            f.write(text_block)
+        self.report_content += text_block
     
     def add_table(self, df, caption=""):
         """Add a table in markdown format"""
+        table_text = ""
+        if caption:
+            table_text += f"**{caption}**\n\n"
+        table_text += df.to_markdown() + "\n\n"
+        
         with open(self.report_file, 'a') as f:
-            if caption:
-                f.write(f"**{caption}**\n\n")
-                self.report_content.append(f"**{caption}**\n\n")
-            f.write(df.to_markdown())
-            f.write("\n\n")
+            f.write(table_text)
+        self.report_content += table_text
     
     def add_metrics_summary(self, metrics_dict, title="Metrics Summary"):
         """Add metrics as a formatted table"""
@@ -222,19 +229,56 @@ class VolatilityReportGeneratorML:
     
     def save_and_add_plot(self, fig, filename, caption=""):
         """Save plot and add to report"""
+        # Create timestamped filename to avoid conflicts across runs
+        if self.run_number > 1:
+            timestamped_filename = f"{filename}_run{self.run_number}"
+        else:
+            timestamped_filename = filename
+            
         # Save plot
-        plot_path = self.image_folder / f"{filename}.png"
+        plot_path = self.image_folder / f"{timestamped_filename}.png"
         fig.savefig(plot_path, dpi=150, bbox_inches='tight')
         
         # Add to report
+        plot_text = ""
+        if caption:
+            plot_text += f"**{caption}**\n\n"
+        plot_text += f"![{caption}](images/{timestamped_filename}.png)\n\n"
+        
         with open(self.report_file, 'a') as f:
-            if caption:
-                f.write(f"**{caption}**\n\n")
-                self.report_content.append(f"**{caption}**\n\n")
-            f.write(f"![{filename}](images/{filename}.png)\n\n")
-            self.report_content.append(f"![{filename}](images/{filename}.png)\n\n")
+            f.write(plot_text)
+        self.report_content += plot_text
+        
+        print(f"  ✓ Saved plot: {timestamped_filename}.png")
     
-    def finalize_report(self):
-        with open(self.report_file, "w") as f:
-            f.writelines(self.report_content)
-        print(f"\n✓ Report saved to: {self.report_file}")
+    def add_run_summary(self, model_name, metrics_dict):
+        """Add a summary for the completed model run"""
+        summary = f"""
+### {model_name} Summary
+
+**Completed:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+"""
+        with open(self.report_file, 'a') as f:
+            f.write(summary)
+        self.report_content += summary
+        
+        self.add_metrics_summary(metrics_dict, title=f"{model_name} Performance Metrics")
+    
+    def finalize_report(self, final_message="Report generation completed"):
+        """Finalize the report with a closing message"""
+        closing = f"""
+---
+
+**{final_message}**
+
+*Last Updated: {datetime.now().strftime('%Y-%m-%d at %H:%M:%S')}*
+"""
+        with open(self.report_file, 'a') as f:
+            f.write(closing)
+        
+        print(f"\n{'='*60}")
+        print(f"✓ Report saved to: {self.report_file}")
+        print(f"  Images:   {self.image_folder}")
+        print(f"  Model Runs: {self.run_number}")
+        print(f"{'='*60}\n")

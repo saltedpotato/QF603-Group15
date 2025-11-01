@@ -59,6 +59,15 @@ except ImportError:
 import warnings
 warnings.filterwarnings('ignore')
 
+# %%
+# Import volatility models from vol_models package
+from vol_models.VolatilityReportGenerator import VolatilityReportGeneratorML as VolatilityReportGenerator
+from vol_models.VolatilityEstimator import volatility_estimator
+from vol_models.VolEstCheck import *
+from vol_models.HARModel import HAR_Model
+from vol_models.EnsembleModel import EnsembleModel
+from vol_models.Metrics import Metric_Evaluation
+
 print("✓ All libraries imported successfully")
 
 # ==============================================================================
@@ -87,327 +96,24 @@ def mspe(y_true, y_pred):
     
     return ((y_true - y_pred) / y_true) ** 2
 
-# %% [markdown]
-# ## Report Generator Class
-
-# %%
-class VolatilityReportGenerator:
-    """
-    A comprehensive report generator for volatility forecasting analysis.
-    Saves plots and outputs in structured markdown format.
-    """
-    
-    def __init__(self, report_name="ml_tft_report", append=False):
-        self.report_name = report_name
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.report_folder = Path(f"report_output_v6")
-        self.report_folder.mkdir(exist_ok=True)
-        self.image_folder = self.report_folder / "images"
-        self.image_folder.mkdir(exist_ok=True)
-        
-        # Find the latest report if in append mode
-        if append:
-            report_files = sorted(self.report_folder.glob(f"{self.report_name}_*.md"), reverse=True)
-            if report_files:
-                self.report_file = report_files[0]
-                print(f"Appending to existing report: {self.report_file}")
-                with open(self.report_file, 'r') as f:
-                    self.report_content = f.read()
-
-                # Define the new TOC entries
-                new_toc_entries = [
-                    "7. [Machine Learning Models Results](#machine-learning-models-results)",
-                    "8. [Temporal Fusion Transformer (TFT) Results](#temporal-fusion-transformer-tft-results)",
-                    "9. [Comprehensive Model Comparison](#comprehensive-model-comparison)"
-                ]
-                
-                # Find the position to insert the new entries (before Conclusions)
-                toc_lines = self.report_content.split('## Table of Contents')[1].split('---')[0].splitlines()
-                
-                # Filter out old entries that will be replaced/renumbered
-                existing_entries = [line for line in toc_lines if line.strip() and not any(new_entry.split('](')[0] in line for new_entry in new_toc_entries)]
-                
-                # Find insertion point
-                insertion_point = -1
-                for i, line in enumerate(existing_entries):
-                    if "conclusions" in line.lower():
-                        insertion_point = i
-                        break
-                if insertion_point == -1:
-                    insertion_point = len(existing_entries) -1 # Fallback to before appendix
-
-                # Combine and renumber
-                final_toc_list = existing_entries[:insertion_point] + new_toc_entries + existing_entries[insertion_point:]
-                
-                # Renumber the whole list
-                renumbered_toc = []
-                for i, line in enumerate(final_toc_list):
-                    if line.strip().startswith(tuple(f"{j}." for j in range(20))):
-                        parts = line.split('.', 1)
-                        renumbered_toc.append(f"{i}.{parts[1]}")
-
-                # Reconstruct the full TOC string
-                new_toc_section = "## Table of Contents\n" + "\n".join(renumbered_toc) + "\n---\n"
-
-                # Replace the old TOC in the report content
-                start_marker = "## Table of Contents"
-                end_marker = "---"
-                start_index = self.report_content.find(start_marker)
-                end_index = self.report_content.find(end_marker, start_index)
-                
-                if start_index != -1 and end_index != -1:
-                    self.report_content = self.report_content[:start_index] + new_toc_section + self.report_content[end_index + len(end_marker):]
-
-                # Add a separator for the new run and convert back to list of lines
-                self.report_content = self.report_content.splitlines(keepends=True)
-                self.add_section(f"New Analysis Run - {self.timestamp}", level=1)
-                return
-
-        # If not appending or no file found, create a new one
-        self.report_file = self.report_folder / f"{self.report_name}_{self.timestamp}.md"
-        self.report_content = []
-        self._init_report()
-        
-    def _init_report(self):
-        """Initialize the markdown report with title"""
-        with open(self.report_file, 'w') as f:
-            f.write(f"# ML & TFT Models Report\n\n")
-            f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"---\n\n")
-    
-    def add_section(self, title, level=2):
-        """Add a section heading"""
-        with open(self.report_file, 'a') as f:
-            f.write(f"\n{'#' * level} {title}\n\n")
-            self.report_content.append(f"\n{'#' * level} {title}\n\n")
-    
-    def add_text(self, text):
-        """Add text content"""
-        with open(self.report_file, 'a') as f:
-            f.write(f"{text}\n\n")
-            self.report_content.append(f"{text}\n\n")
-    
-    def add_table(self, df, caption=""):
-        """Add a table in markdown format"""
-        with open(self.report_file, 'a') as f:
-            if caption:
-                f.write(f"**{caption}**\n\n")
-                self.report_content.append(f"**{caption}**\n\n")
-            f.write(df.to_markdown())
-            f.write("\n\n")
-    
-    def add_metrics_summary(self, metrics_dict, title="Metrics Summary"):
-        """Add metrics as a formatted table"""
-        df = pd.DataFrame(metrics_dict, index=[0]).T
-        df.columns = ['Value']
-        self.add_table(df, caption=title)
-    
-    def save_and_add_plot(self, fig, filename, caption=""):
-        """Save plot and add to report"""
-        # Save plot
-        plot_path = self.image_folder / f"{filename}.png"
-        fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-        
-        # Add to report
-        with open(self.report_file, 'a') as f:
-            if caption:
-                f.write(f"**{caption}**\n\n")
-                self.report_content.append(f"**{caption}**\n\n")
-            f.write(f"![{filename}](images/{filename}.png)\n\n")
-            self.report_content.append(f"![{filename}](images/{filename}.png)\n\n")
-    
-    def finalize_report(self):
-        with open(self.report_file, "w") as f:
-            f.writelines(self.report_content)
-        print(f"\n✓ Report saved to: {self.report_file}")
+# ==============================================================================
+# HELPER CLASSES AND FUNCTIONS
+# ==============================================================================
 
 print("✓ Report generator class loaded")
-
 
 # %% [markdown]
 # ## Helper Classes for Volatility Analysis
 
 # %%
-class volatility_estimator:
-    """
-    Compute various volatility estimators from OHLC data.
-    Same implementation as in stat_model_r6.py
-    """
-    def __init__(self, add_log):
-        self.add_log = add_log
+# Classes are now imported from vol_models:
+# - volatility_estimator from VolatilityEstimator
+# - HAR_Model from HARModel
+# - Metric_Evaluation from Metrics
+# - EnsembleModel from EnsembleModel
+# - VolatilityReportGenerator from VolatilityReportGenerator
 
-    def _check(self, df):
-        required = ['High', 'Low', 'Open', 'Close']
-        if not set(required).issubset(df.columns):
-            raise ValueError(f"Dataframe needs columns {required}.")
-        if (df[required]<=0).any().any():
-            raise ValueError(f"Dataframe contains nonpositive values")
-        return df
-
-    def compute_square_return(self, df):
-        df = self._check(df)
-        log_return = np.log(df['Close'] / df['Close'].shift(1))
-        return 252*(log_return ** 2)
-
-    def compute_parkinson_estimator(self, df):
-        df = self._check(df)
-        log_par_var = (np.log(df['High'] / df['Low']))**2
-        return 252*((1/(4*np.log(2))) * log_par_var)
-
-    def compute_gk_estimator(self, df):
-        df = self._check(df)
-        gk_var_1 = (1/2)*(np.log(df['High']/df['Low']))**2
-        gk_var_2 = (2*np.log(2)-1)*(np.log(df['Close']/df['Open']))**2
-        return 252*(gk_var_1 - gk_var_2)
-
-    def compute_rs_estimator(self, df):
-        df = self._check(df)
-        rs_var_1 = (np.log(df['High']/df['Open']))*(np.log(df['High']/df['Close']))
-        rs_var_2 = (np.log(df['Low']/df['Open']))*(np.log(df['Low']/df['Close']))
-        return 252*(rs_var_1 + rs_var_2)
-
-    def compute_all(self, df, lag_for_predictors:bool=False):
-        df = self._check(df).copy()
-        eps = 1e-12
-
-        out = pd.DataFrame(index = df.index)
-        out['square_est'] = self.compute_square_return(df)
-        out['parkinson_est'] = self.compute_parkinson_estimator(df)
-        out['gk_est'] = self.compute_gk_estimator(df)
-        out['rs_est'] = self.compute_rs_estimator(df)
-
-        if self.add_log:
-            for col in ['square_est', 'parkinson_est', 'gk_est', 'rs_est']:
-                x = out[col].astype(float).replace([np.inf, -np.inf], np.nan)
-                out[col + '_log'] = np.log(x.clip(lower=eps))
-        if lag_for_predictors:
-            out = out.shift(1)
-
-        return out
-
-
-class HAR_Model:
-    """
-    Heterogeneous Autoregressive (HAR) model for volatility forecasting.
-    """
-    
-    def __init__(self, y_log_col, exo_col=None, lags=[1, 5, 22]):
-        self.y_log_col = y_log_col
-        self.exo_col = exo_col if exo_col else []
-        self.lags = lags
-        
-    def features(self, df_in):
-        """
-        Create HAR features from input data.
-        
-        Parameters:
-        -----------
-        df_in : pd.DataFrame
-            Input dataframe with volatility and exogenous variables
-            
-        Returns:
-        --------
-        pd.DataFrame : Feature matrix with HAR lags
-        """
-        df = df_in.copy()
-        
-        # Create lagged features for volatility
-        for lag in self.lags:
-            if lag == 1:
-                df[f'{self.y_log_col}_lag{lag}'] = df[self.y_log_col].shift(lag)
-            else:
-                df[f'{self.y_log_col}_lag{lag}'] = df[self.y_log_col].rolling(window=lag).mean().shift(1)
-        
-        # Select feature columns
-        feature_cols = [f'{self.y_log_col}_lag{lag}' for lag in self.lags]
-        
-        # Add exogenous variables if provided
-        if self.exo_col:
-            feature_cols.extend(self.exo_col)
-        
-        # Return features, dropping NaN rows
-        X = df[feature_cols].copy()
-        return X.dropna()
-
-
-class Metric_Evaluation:
-    """
-    Metrics for evaluating volatility forecasts.
-    """
-    
-    @staticmethod
-    def qlike(y_true, y_pred):
-        """
-        Quasi-Likelihood (QLIKE) loss function.
-        
-        Parameters:
-        -----------
-        y_true : pd.Series or np.array
-            True variance values
-        y_pred : pd.Series or np.array
-            Predicted variance values
-            
-        Returns:
-        --------
-        pd.Series or np.array : QLIKE loss values
-        """
-        return (y_true / y_pred) - np.log(y_true / y_pred) - 1
-    
-    @staticmethod
-    def mspe(y_true, y_pred):
-        """
-        Mean Squared Percentage Error (MSPE).
-        
-        Parameters:
-        -----------
-        y_true : pd.Series or np.array
-            True variance values
-        y_pred : pd.Series or np.array
-            Predicted variance values
-            
-        Returns:
-        --------
-        pd.Series or np.array : MSPE values
-        """
-        return ((y_true - y_pred) / y_true) ** 2
-
-
-class EnsembleModel:
-    """
-    Ensemble model that combines multiple estimators using inverse QLIKE weighting.
-    """
-    
-    def __init__(self, estimators=None):
-        self.estimators = estimators
-        self.weights = None
-        
-    def compute_weightage(self, qlike_mean):
-        """
-        Compute ensemble weights based on inverse QLIKE.
-        
-        Parameters:
-        -----------
-        qlike_mean : pd.Series or dict
-            Mean QLIKE values for each estimator
-            
-        Returns:
-        --------
-        dict : Weights for each estimator (sum to 1)
-        """
-        if isinstance(qlike_mean, pd.Series):
-            qlike_mean = qlike_mean.to_dict()
-        
-        # Inverse QLIKE (lower QLIKE = higher weight)
-        inv_qlike = {k: 1.0 / v for k, v in qlike_mean.items()}
-        total = sum(inv_qlike.values())
-        
-        # Normalize to sum to 1
-        weights = {k: v / total for k, v in inv_qlike.items()}
-        
-        self.weights = weights
-        return weights
-
-print("✓ Helper classes loaded")
+print("✓ Helper classes loaded from vol_models")
 
 
 # %% [markdown]
