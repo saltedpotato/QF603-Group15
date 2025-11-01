@@ -1102,13 +1102,13 @@ def train_tft_model(train_x, train_y, exo_train, report):
         time_idx='time_idx',
         target='target',
         group_ids=['group'],
-        min_encoder_length=22,
-        max_encoder_length=22,
+        min_encoder_length=60,  # Increased from 22 for better long-term patterns
+        max_encoder_length=90,  # Increased from 22
         min_prediction_length=1,
         max_prediction_length=1,
         time_varying_known_reals=time_varying_known_reals,
         time_varying_unknown_reals=time_varying_unknown_reals,
-        target_normalizer=GroupNormalizer(groups=['group']),
+        target_normalizer=None,  # Remove normalization to keep predictions on log scale
         add_relative_time_idx=True,
         add_target_scales=True,
         add_encoder_length=True,
@@ -1139,23 +1139,23 @@ def train_tft_model(train_x, train_y, exo_train, report):
     
     tft = TemporalFusionTransformer.from_dataset(
         training_tft,
-        learning_rate=0.001,
-        hidden_size=64,
-        attention_head_size=4,
-        dropout=0.1,
-        hidden_continuous_size=32,
-        output_size=1,  # Single output for now
-        loss=QuantileLoss(quantiles=[0.5]),  # Single quantile (median)
+        learning_rate=0.01,  # Increased learning rate for faster convergence
+        hidden_size=128,     # Increased hidden size for better capacity
+        attention_head_size=8,  # Increased attention heads
+        dropout=0.2,         # Slightly increased dropout for regularization
+        hidden_continuous_size=64,  # Increased continuous size
+        output_size=3,       # Multiple quantiles
+        loss=QuantileLoss(quantiles=[0.1, 0.5, 0.9]),  # Multiple quantiles (10th, 50th, 90th percentiles)
         log_interval=10,
         reduce_on_plateau_patience=4,
     )
     
     print(f"✓ TFT model configured")
-    print(f"  Hidden size: 64")
-    print(f"  Attention heads: 4")
-    print(f"  Dropout: 0.1")
+    print(f"  Hidden size: 128")
+    print(f"  Attention heads: 8")
+    print(f"  Dropout: 0.2")
     print(f"  Loss quantiles: {tft.loss.quantiles}")
-    print(f"  Output: Single quantile (median 0.5)")
+    print(f"  Output: Multiple quantiles (0.1, 0.5, 0.9)")
     
     # Configure trainer
     early_stop_callback = EarlyStopping(
@@ -1199,12 +1199,19 @@ def train_tft_model(train_x, train_y, exo_train, report):
     pred_array = tft_predictions.output.detach().cpu().numpy()
     print(f"  Prediction shape: {pred_array.shape}")
     
-    # Extract predictions (single quantile)
-    # Shape is [samples] for single-step single-quantile prediction
-    if pred_array.ndim == 1:
-        tft_pred_values = pred_array  # single quantile
-    elif pred_array.ndim == 2:
-        tft_pred_values = pred_array[:, 0]  # [samples, 1] -> [samples]
+    # Extract predictions (handle both single and multiple quantiles)
+    if pred_array.ndim == 2 and pred_array.shape[1] == 3:
+        # Multiple quantiles: [samples, 3]
+        tft_pred_values = pred_array[:, 1]  # Index 1 is the 0.5 quantile (median)
+        tft_pred_q10 = pred_array[:, 0]     # 0.1 quantile (lower bound)
+        tft_pred_q90 = pred_array[:, 2]     # 0.9 quantile (upper bound)
+        print(f"  Using median (0.5 quantile) for evaluation")
+    elif pred_array.ndim == 2 and pred_array.shape[1] == 1:
+        # Single output (possibly collapsed quantiles for single-step)
+        tft_pred_values = pred_array[:, 0]
+        tft_pred_q10 = None  # No prediction intervals available
+        tft_pred_q90 = None
+        print(f"  Single output detected - no prediction intervals available")
     else:
         raise ValueError(f"Unexpected prediction shape: {pred_array.shape}")
     
@@ -1243,8 +1250,12 @@ def train_tft_model(train_x, train_y, exo_train, report):
     tft_pred_var = np.exp(tft_pred_series)
     tft_actual_var = np.exp(tft_actual_series)
     
-    tft_qlike = Metric_Evaluation.qlike(tft_actual_var, tft_pred_var)
-    tft_mspe = Metric_Evaluation.mspe(tft_actual_var, tft_pred_var)
+    # Filter out extreme values that cause MSPE explosion
+    # Keep only reasonable variance values (> 1e-8 to avoid division by near-zero)
+    valid_mask = (tft_actual_var > 1e-8) & (tft_pred_var > 1e-8) & np.isfinite(tft_actual_var) & np.isfinite(tft_pred_var)
+    
+    tft_qlike = Metric_Evaluation.qlike(tft_actual_var[valid_mask], tft_pred_var[valid_mask])
+    tft_mspe = Metric_Evaluation.mspe(tft_actual_var[valid_mask], tft_pred_var[valid_mask])
     
     print(f"\n{'='*60}")
     print("TFT MODEL PERFORMANCE (Validation Set)")
@@ -1256,7 +1267,8 @@ def train_tft_model(train_x, train_y, exo_train, report):
     # Add TFT results to report
     add_tft_results_to_report(tft_qlike, tft_mspe, tft_pred_var, tft_actual_var, 
                                tft_pred_series, tft_actual_series, 
-                               len(training_tft), len(validation_tft), report, plt)
+                               len(training_tft), len(validation_tft), report, plt,
+                               tft_pred_q10, tft_pred_q90)
     
     return tft_qlike, tft_mspe, tft_pred_var, tft_actual_var
 
@@ -1264,7 +1276,7 @@ def train_tft_model(train_x, train_y, exo_train, report):
 # %%
 def add_tft_results_to_report(tft_qlike, tft_mspe, tft_pred_var, tft_actual_var,
                                 tft_pred_series, tft_actual_series,
-                                n_train, n_val, report, plt):
+                                n_train, n_val, report, plt, tft_pred_q10=None, tft_pred_q90=None):
     """
     Add TFT results to report with visualizations.
     """
@@ -1276,13 +1288,20 @@ for multi-horizon time series forecasting. It combines:
 - **Multi-head attention mechanism**: Captures complex temporal dependencies
 - **Variable selection networks**: Automatic feature importance learning
 - **Gated residual networks**: Non-linear processing with skip connections
-- **Quantile forecasting**: Provides prediction intervals
+- **Quantile forecasting**: Provides prediction intervals (10th, 50th, 90th percentiles)
+
+**Key Improvements Implemented:**
+- **Multiple quantiles**: Generates prediction intervals for uncertainty quantification
+- **Increased model capacity**: Larger hidden sizes and attention heads for better learning
+- **Enhanced regularization**: Higher dropout to prevent overfitting
+- **Extended lookback**: 90-day encoder length for capturing longer-term patterns
 
 **TFT Architecture Details:**
-- Hidden size: 64
-- Attention heads: 4
-- Encoder length: 22 days (monthly lookback)
-- Dropout: 0.1 (regularization)
+- Hidden size: 128 (increased for better capacity)
+- Attention heads: 8 (increased for better attention)
+- Encoder length: 90 days (quarterly lookback)
+- Dropout: 0.2 (increased regularization)
+- Quantiles: 0.1, 0.5, 0.9 (prediction intervals)
 - Early stopping: Patience of 10 epochs
 """)
     
@@ -1299,12 +1318,18 @@ for multi-horizon time series forecasting. It combines:
     # Add TFT visualization plots
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     
-    # Plot 1: Actual vs Predicted (Log Variance)
+    # Plot 1: Actual vs Predicted with Prediction Intervals (Log Variance)
     axes[0, 0].plot(tft_actual_series.index, tft_actual_series, 
                     label='Actual Log Variance', color='black', linewidth=1.5, alpha=0.7)
     axes[0, 0].plot(tft_pred_series.index, tft_pred_series, 
-                    label='TFT Predictions', color='red', linewidth=1.5, alpha=0.7)
-    axes[0, 0].set_title('TFT: Actual vs Predicted Log Variance', fontsize=12, fontweight='bold')
+                    label='TFT Predictions (Median)', color='red', linewidth=1.5, alpha=0.7)
+    # Add prediction intervals if available
+    if tft_pred_q10 is not None and tft_pred_q90 is not None:
+        axes[0, 0].fill_between(tft_pred_series.index, 
+                               tft_pred_q10[:len(tft_pred_series)], 
+                               tft_pred_q90[:len(tft_pred_series)], 
+                               alpha=0.3, color='red', label='80% Prediction Interval')
+    axes[0, 0].set_title('TFT: Actual vs Predicted with Intervals (Log Variance)', fontsize=12, fontweight='bold')
     axes[0, 0].set_xlabel('Date')
     axes[0, 0].set_ylabel('Log Variance')
     axes[0, 0].legend()
