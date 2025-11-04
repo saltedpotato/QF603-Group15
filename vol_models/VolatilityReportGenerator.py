@@ -39,7 +39,24 @@ class VolatilityReportGeneratorStats:
             f.write(f"7. [Model Comparison](#model-comparison)\n")
             f.write(f"8. [Test Set Evaluation](#test-set-evaluation)\n")
             f.write(f"9. [Conclusions](#conclusions)\n")
-            f.write(f"10. [Appendix](#appendix)\n\n")
+            f.write(f"10. [Appendix](#appendix)\n")
+            f.write(f"    - [Volatility Estimators](#volatility-estimators-used)\n")
+            f.write(f"    - [HAR Model Specification](#har-model-specification)\n")
+            f.write(f"    - [Exogenous Variables (HARX)](#exogenous-variables-harx)\n")
+            f.write(f"    - [Metrics](#metrics)\n")
+            f.write(f"    - [Machine Learning Models](#machine-learning-models-5-models)\n")
+            f.write(f"        - [Random Forest (RF)](#rf-model-charts)\n")
+            f.write(f"        - [Gradient Boosting (GBM)](#gbm-model-charts)\n")
+            f.write(f"        - [XGBoost](#xgboost-model-charts)\n")
+            f.write(f"        - [LightGBM](#lightgbm-model-charts)\n")
+            f.write(f"        - [CatBoost](#catboost-model-charts)\n")
+            f.write(f"    - [Deep Learning Model](#deep-learning-model)\n")
+            f.write(f"        - [Temporal Fusion Transformer (TFT)](#temporal-fusion-transformer-tft-results)\n")
+            f.write(f"    - [Comparative Analysis](#comparative-analysis)\n")
+            f.write(f"        - [ML Models Performance Summary](#ml-models-performance-training-set)\n")
+            f.write(f"        - [ML Models Rankings](#ml-models-analysis--recommendations)\n")
+            f.write(f"        - [TFT Detailed Metrics](#tft-model-performance-validation-set)\n")
+            f.write(f"        - [Comprehensive Model Comparison](#comprehensive-model-comparison)\n\n")
             f.write(f"---\n\n")
     
     def add_section(self, title, level=2):
@@ -137,6 +154,7 @@ class VolatilityReportGeneratorML:
         self.image_folder.mkdir(exist_ok=True)
         self.run_number = 1
         self.is_appending = False
+        self.toc_entries = []  # Track TOC entries for dynamic updates
         
         # Try to find and append to latest report
         report_files = sorted(self.report_folder.glob(f"{self.report_name}_*.md"), reverse=True)
@@ -171,15 +189,30 @@ class VolatilityReportGeneratorML:
 
 ## Table of Contents
 
-1. [Model Run 1](#model-run-1)
+### Machine Learning Models (5 Models)
+1. [Random Forest (RF)](#rf-model-charts)
+2. [Gradient Boosting (GBM)](#gbm-model-charts)
+3. [XGBoost](#xgboost-model-charts)
+4. [LightGBM](#lightgbm-model-charts)
+5. [CatBoost](#catboost-model-charts)
+
+### Deep Learning Model
+6. [Temporal Fusion Transformer (TFT)](#temporal-fusion-transformer-tft-results)
+
+### Comparative Analysis
+7. [ML Models Performance Summary](#ml-models-performance-training-set)
+8. [ML Models Rankings](#ml-models-analysis--recommendations)
+9. [TFT Detailed Metrics](#tft-model-performance-validation-set)
+10. [Comprehensive Model Comparison](#comprehensive-model-comparison)
 
 ---
+
+## Model Run 1
 
 """
         with open(self.report_file, 'w') as f:
             f.write(report_text)
         self.report_content = report_text
-        self.add_section(f"Model Run {self.run_number}", level=2)
     
     def _append_new_run(self):
         """Append a new model run section to existing report"""
@@ -195,6 +228,13 @@ class VolatilityReportGeneratorML:
         # Update in-memory content
         self.report_content += new_run_text
         print(f"✓ Started Model Run {self.run_number}")
+    
+    def update_toc_for_ml_models(self):
+        """
+        Legacy method - ML models are now included in initial TOC.
+        Kept for backward compatibility with existing code.
+        """
+        print(f"✓ Table of Contents already includes ML models section")
     
     def add_section(self, title, level=2):
         """Add a section heading"""

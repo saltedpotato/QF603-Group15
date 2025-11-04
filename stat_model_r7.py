@@ -63,6 +63,7 @@
 # !pip install statsmodels
 # !pip install lets-plot
 # !pip install tabulate
+# !pip install plotly
 
 # %%
 # Check and install required packages for report generation
@@ -111,6 +112,8 @@ import yfinance as yf
 
 from lets_plot import *
 LetsPlot.setup_html()
+
+import plotly.graph_objects as go
 
 # %%
 from vol_models.VolatilityReportGenerator import *
@@ -228,7 +231,43 @@ y_true =\
            tlt_data["Close"]))**2
 
 )
+
+# This calculates the log of the returns, and then in order to get the historical.realized var we take a square of the log returns and multiply by 252 to annualize
+
+# Daily returns are squared to get daily variance.
+# To express this on an annual scale, multiply by 252 (approximate number of trading days in a year).
+# This standardizes volatility to an annualized basis, making it comparable across periods and assets (e.g., "annualized volatility of 20%").
+
+# %%
 y_true_log = np.log(y_true.clip(lower=eps))
+
+# %%
+
+# Plot y_true and y_true_log using Plotly
+# fig = go.Figure()
+# fig.add_trace(go.Scatter(x=y_true.index, y=y_true.values, mode='lines', name='y_true (Annualized Variance)'))
+# fig.add_trace(go.Scatter(x=y_true_log.index, y=y_true_log.values, mode='lines', name='y_true_log (Log Variance)'))
+# fig.update_layout(
+#     title='Comparison of y_true and y_true_log',
+#     xaxis_title='Date',
+#     yaxis_title='Value',
+#     legend_title='Series'
+# )
+# fig.show()
+
+# %%
+
+# Draw a hist plot of y_true_log
+# fig = go.Figure()
+# fig.add_trace(go.Histogram(x=y_true_log.values, nbinsx=100))
+# fig.update_layout(
+#     title='Histogram of y_true_log',
+#     xaxis_title='y_true_log (Log Variance)',
+#     yaxis_title='Frequency'
+# )
+# fig.show()
+
+# %%
 y_true_log =\
 (
     y_true_log
@@ -407,7 +446,8 @@ diag_tbl = pd.DataFrame(summary_rows).set_index("Estimator")
 diag_tbl["Stationary (ADF∩KPSS)"] = diag_tbl["ADF pass (p≤α)"] & diag_tbl["KPSS pass (p>α)"]
 
 with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
-    display(diag_tbl)
+    # display(diag_tbl)
+    print(diag_tbl)
 
 # %%
 # Add diagnostics table to report
@@ -427,8 +467,8 @@ report.add_table(diag_tbl, caption="Table 1: Diagnostic Tests for Volatility Est
 # Plot ACF and PACF for each log-vol estimator
 for col in vol_estimator_check.columns:
     print(f"=== {col} ===")
-    vol_check.plot_acf(vol_estimator_check[col], nlags=40, title=f"ACF - {col}")
-    vol_check.plot_pacf(vol_estimator_check[col], nlags=40, title=f"PACF - {col}")
+    # vol_check.plot_acf(vol_estimator_check[col], nlags=40, title=f"ACF - {col}")
+    # vol_check.plot_pacf(vol_estimator_check[col], nlags=40, title=f"PACF - {col}")
 
 # %%
 # Save ACF and PACF plots to report
@@ -440,20 +480,23 @@ The Autocorrelation Function (ACF) and Partial Autocorrelation Function (PACF) p
 - **HAR model justification**: These patterns support using daily (1), weekly (5), and monthly (22) lags
 """)
 
-for col in vol_estimator_check.columns:
-    # ACF plot
-    fig_acf = plt.figure(figsize=(12, 4))
-    plot_acf(vol_estimator_check[col].dropna(), lags=40, ax=plt.gca())
-    plt.title(f"ACF - {col}")
-    report.save_and_add_plot(fig_acf, f"acf_{col}", caption=f"ACF for {col}")
-    plt.close()
+# Combined ACF and PACF plot for all estimators
+columns = list(vol_estimator_check.columns)
+n_cols = len(columns)
+fig, axes = plt.subplots(n_cols, 2, figsize=(16, 6 * n_cols))
+
+for i, col in enumerate(columns):
+    # ACF
+    plot_acf(vol_estimator_check[col].dropna(), lags=40, ax=axes[i, 0])
+    axes[i, 0].set_title(f"ACF - {col}")
     
-    # PACF plot
-    fig_pacf = plt.figure(figsize=(12, 4))
-    plot_pacf(vol_estimator_check[col].dropna(), lags=40, ax=plt.gca())
-    plt.title(f"PACF - {col}")
-    report.save_and_add_plot(fig_pacf, f"pacf_{col}", caption=f"PACF for {col}")
-    plt.close()
+    # PACF
+    plot_pacf(vol_estimator_check[col].dropna(), lags=40, ax=axes[i, 1])
+    axes[i, 1].set_title(f"PACF - {col}")
+
+plt.tight_layout()
+report.save_and_add_plot(fig, "acf_pacf_all_estimators", caption="ACF and PACF for All Volatility Estimators")
+plt.close()
     
 print("✓ ACF and PACF plots saved to report")
 
@@ -628,7 +671,8 @@ for w in window:
   plt.legend()
   plt.title(f"HAR prediction vs true RV for window {w}")
   plt.tight_layout()
-  plt.show()
+  # plt.show()
+  pass
 
 
 # %%
@@ -661,27 +705,29 @@ print("✓ HAR prediction plots saved to report")
 # %%
 # IN variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  qlike_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']].plot()
-  plt.xlabel("Date")
-  plt.ylabel("QLIKE")
-  plt.legend()
-  plt.title(f"QLIKE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # qlike_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("QLIKE")
+  # plt.legend()
+  # plt.title(f"QLIKE Loss for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 
 # %%
 # IN variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  qlike_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log']].plot()
-  plt.xlabel("Date")
-  plt.ylabel("QLIKE")
-  plt.legend()
-  plt.title(f"QLIKE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # qlike_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log']].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("QLIKE")
+  # plt.legend()
+  # plt.title(f"QLIKE Loss for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 # %%
 # Save QLIKE and MSPE loss plots to report
@@ -720,14 +766,15 @@ print("✓ Loss metric plots saved to report")
 # %%
 #in variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  mspe_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']].plot()
-  plt.xlabel("Date")
-  plt.ylabel("MSPE")
-  plt.legend()
-  plt.title(f"MSPE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # mspe_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("MSPE")
+  # plt.legend()
+  # plt.title(f"MSPE Loss for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 # %% [markdown]
 # ### Findings:
@@ -844,31 +891,34 @@ for w in window:
   plt.legend()
   plt.title(f"HAR prediction vs true RV for window {w}")
   plt.tight_layout()
-  plt.show()
+  # plt.show()
+  pass
 
 # %%
 # IN variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  qlike_loss_ensemble[w].plot()
-  plt.xlabel("Date")
-  plt.ylabel("QLIKE")
-  plt.title(f"QLIKE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # qlike_loss_ensemble[w].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("QLIKE")
+  # plt.title(f"QLIKE Loss for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 
 # %%
 #in variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  mspe_loss_ensemble[w].plot()
-  plt.xlabel("Date")
-  plt.ylabel("MSPE")
-  plt.legend()
-  plt.title(f"MSPE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # mspe_loss_ensemble[w].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("MSPE")
+  # plt.legend()
+  # plt.title(f"MSPE Loss for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 # %%
 # Save ensemble plots to report
@@ -923,8 +973,8 @@ print("✓ Ensemble plots saved to report")
 # plot acf and pacf
 for w in window:
     print(f"=== {w} ===")
-    vol_check.plot_acf(residual_ensemble[w], nlags=40, title=f"ACF - Window {w}")
-    vol_check.plot_pacf(residual_ensemble[w], nlags=40, title=f"PACF - Window {w}")
+    # vol_check.plot_acf(residual_ensemble[w], nlags=40, title=f"ACF - Window {w}")
+    # vol_check.plot_pacf(residual_ensemble[w], nlags=40, title=f"PACF - Window {w}")
 
 
 
@@ -1109,7 +1159,8 @@ diag_tbl = pd.DataFrame(summary_rows).set_index("Estimator")
 diag_tbl["Stationary (ADF∩KPSS)"] = diag_tbl["ADF pass (p≤α)"] & diag_tbl["KPSS pass (p>α)"]
 
 with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
-    display(diag_tbl)
+    # display(diag_tbl)
+    print(diag_tbl)
 
 # %%
 # Add HARX exogenous variables diagnostics to report
@@ -1187,14 +1238,15 @@ diag_tbl = pd.DataFrame(summary_rows).set_index("Estimator")
 diag_tbl["Stationary (ADF∩KPSS)"] = diag_tbl["ADF pass (p≤α)"] & diag_tbl["KPSS pass (p>α)"]
 
 with pd.option_context('display.float_format', lambda v: f"{v:.4g}"):
-    display(diag_tbl)
+    # display(diag_tbl)
+    print(diag_tbl)
 
 # %%
 # Plot ACF and PACF for each log-vol estimator
 for col in exo_std_harx_r1.columns:
     print(f"=== {col} ===")
-    vol_check.plot_acf(exo_std_harx_r1[col], nlags=40, title=f"ACF - {col}")
-    vol_check.plot_pacf(exo_std_harx_r1[col], nlags=40, title=f"PACF - {col}")
+    # vol_check.plot_acf(exo_std_harx_r1[col], nlags=40, title=f"ACF - {col}")
+    # vol_check.plot_pacf(exo_std_harx_r1[col], nlags=40, title=f"PACF - {col}")
 
 # %% [markdown]
 # ### Adjust exogeneous variables
@@ -1330,40 +1382,43 @@ for w in window:
 
   ytrue_plot = y_adj.loc[common_idx].to_frame(name = 'true_RV')
 
-  plt.figure(figsize=[16,7])
-  yhat_plot.plot(ax=plt.gca(), alpha=0.9)
-  ytrue_plot.plot(ax=plt.gca(), color='black', linewidth=2, alpha=0.3, label='True RV')
-  plt.xlabel("Date")
-  plt.ylabel("Log variance")
-  plt.legend()
-  plt.title(f"HAR prediction vs true RV for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # yhat_plot.plot(ax=plt.gca(), alpha=0.9)
+  # ytrue_plot.plot(ax=plt.gca(), color='black', linewidth=2, alpha=0.3, label='True RV')
+  # plt.xlabel("Date")
+  # plt.ylabel("Log variance")
+  # plt.legend()
+  # plt.title(f"HAR prediction vs true RV for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 
 # %%
 # IN variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  qlike_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']].plot()
-  plt.xlabel("Date")
-  plt.ylabel("QLIKE")
-  plt.legend()
-  plt.title(f"QLIKE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # qlike_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("QLIKE")
+  # plt.legend()
+  # plt.title(f"QLIKE Loss for window {w}")
+  # plt.tight_layout()
+  pass
+  # plt.show()
 
 # %%
 # IN variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  qlike_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log']].plot()
-  plt.xlabel("Date")
-  plt.ylabel("QLIKE")
-  plt.legend()
-  plt.title(f"QLIKE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # qlike_loss_df[w][['square_est_log', 'parkinson_est_log', 'gk_est_log']].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("QLIKE")
+  # plt.legend()
+  # plt.title(f"QLIKE Loss for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 # %%
 
@@ -1490,30 +1545,33 @@ for w in window:
   plt.legend()
   plt.title(f"HAR prediction vs true RV for window {w}")
   plt.tight_layout()
-  plt.show()
+  # plt.show()
+  pass
 
 # %%
 # IN variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  qlike_loss_ensemble[w].plot()
-  plt.xlabel("Date")
-  plt.ylabel("QLIKE")
-  plt.title(f"QLIKE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # qlike_loss_ensemble[w].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("QLIKE")
+  # plt.title(f"QLIKE Loss for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 # %%
 #in variance scale
 for w in window:
-  plt.figure(figsize=[16,7])
-  mspe_loss_ensemble[w].plot()
-  plt.xlabel("Date")
-  plt.ylabel("MSPE")
-  plt.legend()
-  plt.title(f"MSPE Loss for window {w}")
-  plt.tight_layout()
-  plt.show()
+  # plt.figure(figsize=[16,7])
+  # mspe_loss_ensemble[w].plot()
+  # plt.xlabel("Date")
+  # plt.ylabel("MSPE")
+  # plt.legend()
+  # plt.title(f"MSPE Loss for window {w}")
+  # plt.tight_layout()
+  # plt.show()
+  pass
 
 # %%
 # plot acf and pacf
@@ -1807,15 +1865,15 @@ print(y_actual_var)
 print(yhat_ensemble_HARX_var)
 
 
-plt.figure(figsize=(12, 6))
-plt.plot(y_actual_var, label='Actual Variance', color='blue')
-plt.plot(yhat_ensemble_HARX_var, label='Predicted Variance (Ensemble HARX)', color='orange')
-plt.xlabel("Date")
-plt.ylabel("Variance")
-plt.legend()
-plt.title(f"HAR prediction vs true RV for window {w}")
-plt.tight_layout()
-plt.show()
+# plt.figure(figsize=(12, 6))
+# plt.plot(y_actual_var, label='Actual Variance', color='blue')
+# plt.plot(yhat_ensemble_HARX_var, label='Predicted Variance (Ensemble HARX)', color='orange')
+# plt.xlabel("Date")
+# plt.ylabel("Variance")
+# plt.legend()
+# plt.title(f"HAR prediction vs true RV for window {w}")
+# plt.tight_layout()
+# plt.show()
 
 
 # %%
@@ -1834,15 +1892,15 @@ y_true_log =\
 y_actual_log =y_true_log.loc[common_idx]
 yhat_ensemble_HARX_log = yhat_ensemble_HARX_f.loc[common_idx]
 
-plt.figure(figsize=(12, 6))
-plt.plot(y_actual_log, label='Actual Variance', color='blue')
-plt.plot(yhat_ensemble_HARX_log, label='Predicted Variance (Ensemble HARX)', color='orange')
-plt.xlabel("Date")
-plt.ylabel("Log Variance")
-plt.legend()
-plt.title(f"HAR prediction vs true RV for window {w}")
-plt.tight_layout()
-plt.show()
+# plt.figure(figsize=(12, 6))
+# plt.plot(y_actual_log, label='Actual Variance', color='blue')
+# plt.plot(yhat_ensemble_HARX_log, label='Predicted Variance (Ensemble HARX)', color='orange')
+# plt.xlabel("Date")
+# plt.ylabel("Log Variance")
+# plt.legend()
+# plt.title(f"HAR prediction vs true RV for window {w}")
+# plt.tight_layout()
+# plt.show()
 
 # %%
 # model prediction performance
@@ -1857,29 +1915,29 @@ print(qlike_loss_df)
 print(mspe_loss_df)
 print(rmse_loss_df)
 
-qlike_loss_df.plot()
-plt.xlabel("Date")
-plt.ylabel("QLIKE")
-plt.legend()
-plt.title(f"QLIKE Loss for Ensemble Model HARX")
-plt.tight_layout()
-plt.show()
+# qlike_loss_df.plot()
+# plt.xlabel("Date")
+# plt.ylabel("QLIKE")
+# plt.legend()
+# plt.title(f"QLIKE Loss for Ensemble Model HARX")
+# plt.tight_layout()
+# plt.show()
 
-mspe_loss_df.plot()
-plt.xlabel("Date")
-plt.ylabel("MSPE")
-plt.legend()
-plt.title(f"MSPE Loss for Ensemble Model HARX")
-plt.tight_layout()
-plt.show()
+# mspe_loss_df.plot()
+# plt.xlabel("Date")
+# plt.ylabel("MSPE")
+# plt.legend()
+# plt.title(f"MSPE Loss for Ensemble Model HARX")
+# plt.tight_layout()
+# plt.show()
 
-rmse_loss_df.plot()
-plt.xlabel("Date")
-plt.ylabel("RMSE")
-plt.legend()
-plt.title(f"RMSE Loss for Ensemble Model HARX")
-plt.tight_layout()
-plt.show()
+# rmse_loss_df.plot()
+# plt.xlabel("Date")
+# plt.ylabel("RMSE")
+# plt.legend()
+# plt.title(f"RMSE Loss for Ensemble Model HARX")
+# plt.tight_layout()
+# plt.show()
 
 # %%
 
@@ -2164,29 +2222,29 @@ print(yhat_ensemble_HAR_var)
 
 # %%
 # VARIANCE SCALE PLOT
-plt.figure(figsize=(12, 6))
-plt.plot(y_actual_var, label='Actual Variance', color='blue')
-plt.plot(yhat_ensemble_HAR_var, label='Predicted Variance (Ensemble HAR)', color='orange')
-plt.xlabel("Date")
-plt.ylabel("Variance")
-plt.legend()
-plt.title(f"HAR prediction vs true RV for window {w_HAR}")
-plt.tight_layout()
-plt.show()
+# plt.figure(figsize=(12, 6))
+# plt.plot(y_actual_var, label='Actual Variance', color='blue')
+# plt.plot(yhat_ensemble_HAR_var, label='Predicted Variance (Ensemble HAR)', color='orange')
+# plt.xlabel("Date")
+# plt.ylabel("Variance")
+# plt.legend()
+# plt.title(f"HAR prediction vs true RV for window {w_HAR}")
+# plt.tight_layout()
+# plt.show()
 
 
 # %%
 # LOG VARIANCE SCALE PLOT
 
-plt.figure(figsize=(12, 6))
-plt.plot(y_actual, label='Actual Variance', color='blue')
-plt.plot(yhat_ensemble_log_HAR, label='Predicted Variance (Ensemble HAR)', color='orange')
-plt.xlabel("Date")
-plt.ylabel("Log Variance")
-plt.legend()
-plt.title(f"HAR prediction vs true RV for window {w_HAR}")
-plt.tight_layout()
-plt.show()
+# plt.figure(figsize=(12, 6))
+# plt.plot(y_actual, label='Actual Variance', color='blue')
+# plt.plot(yhat_ensemble_log_HAR, label='Predicted Variance (Ensemble HAR)', color='orange')
+# plt.xlabel("Date")
+# plt.ylabel("Log Variance")
+# plt.legend()
+# plt.title(f"HAR prediction vs true RV for window {w_HAR}")
+# plt.tight_layout()
+# plt.show()
 
 
 # %%
@@ -2202,29 +2260,29 @@ print(qlike_loss_df)
 print(mspe_loss_df)
 print(rmse_loss_df)
 
-qlike_loss_df.plot()
-plt.xlabel("Date")
-plt.ylabel("QLIKE")
-plt.legend()
-plt.title(f"QLIKE Loss for Ensemble Model HAR")
-plt.tight_layout()
-plt.show()
+# qlike_loss_df.plot()
+# plt.xlabel("Date")
+# plt.ylabel("QLIKE")
+# plt.legend()
+# plt.title(f"QLIKE Loss for Ensemble Model HAR")
+# plt.tight_layout()
+# plt.show()
 
-mspe_loss_df.plot()
-plt.xlabel("Date")
-plt.ylabel("MSPE")
-plt.legend()
-plt.title(f"MSPE Loss for Ensemble Model HAR")
-plt.tight_layout()
-plt.show()
+# mspe_loss_df.plot()
+# plt.xlabel("Date")
+# plt.ylabel("MSPE")
+# plt.legend()
+# plt.title(f"MSPE Loss for Ensemble Model HAR")
+# plt.tight_layout()
+# plt.show()
 
-rmse_loss_df.plot()
-plt.xlabel("Date")
-plt.ylabel("RMSE")
-plt.legend()
-plt.title(f"RMSE Loss for Ensemble Model HAR")
-plt.tight_layout()
-plt.show()
+# rmse_loss_df.plot()
+# plt.xlabel("Date")
+# plt.ylabel("RMSE")
+# plt.legend()
+# plt.title(f"RMSE Loss for Ensemble Model HAR")
+# plt.tight_layout()
+# plt.show()
 
 
 # %%
@@ -2422,6 +2480,7 @@ print(f"  ✓ Test set evaluation results")
 print(f"  ✓ Conclusions and recommendations")
 print(f"\nUse this report as a blueprint for your final presentation!")
 print("="*80)
+
 
 # %% [markdown]
 # ## 📊 How to Use the Generated Report

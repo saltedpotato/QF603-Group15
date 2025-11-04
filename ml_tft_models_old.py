@@ -42,8 +42,8 @@ from statsmodels.tsa.stattools import adfuller
 # Train test split
 from sklearn.model_selection import train_test_split
 
-# Metrics
-from sklearn.metrics import mean_squared_error, r2_score
+# MSE
+from sklearn.metrics import mean_squared_error
 
 # ACF/PACF plots
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
@@ -75,26 +75,6 @@ print("✓ All libraries imported successfully")
 # HELPER CLASSES AND FUNCTIONS
 # ==============================================================================
 
-def qlike(y_true, y_pred):
-    """Corrected Quasi-Likelihood (QLIKE) loss function."""
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-
-    # Avoid invalid values before division/log operations
-    y_pred = np.where(y_pred <= 0, 1e-8, y_pred)
-    y_true = np.where(y_true <= 0, 1e-8, y_true)
-
-    return np.log(y_pred) + (y_true / y_pred)
-
-def mspe(y_true, y_pred):
-    """Mean Squared Percentage Error loss function."""
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    
-    # Avoid division by zero
-    y_true[y_true == 0] = 1e-8
-    
-    return ((y_true - y_pred) / y_true) ** 2
 
 def rmse(y_true, y_pred):
     """Root Mean Squared Error."""
@@ -131,6 +111,27 @@ def calculate_directional_accuracy(y_true, y_pred):
     # Calculate accuracy
     accuracy = np.mean(direction_match)
     return accuracy
+
+def qlike(y_true, y_pred):
+    """Corrected Quasi-Likelihood (QLIKE) loss function."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+
+    # Avoid invalid values before division/log operations
+    y_pred = np.where(y_pred <= 0, 1e-8, y_pred)
+    y_true = np.where(y_true <= 0, 1e-8, y_true)
+
+    return np.log(y_pred) + (y_true / y_pred)
+
+def mspe(y_true, y_pred):
+    """Mean Squared Percentage Error loss function."""
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    
+    # Avoid division by zero
+    y_true[y_true == 0] = 1e-8
+    
+    return ((y_true - y_pred) / y_true) ** 2
 
 # ==============================================================================
 # HELPER CLASSES AND FUNCTIONS
@@ -304,9 +305,6 @@ def load_data():
     train_x = train_rv[estimators].copy()
     train_y = train_rv['square_est_log'].copy()  # Target is square estimator
     
-    test_x = test_rv[estimators].copy()
-    test_y = test_rv['square_est_log'].copy()  # Target is square estimator
-    
     print("\n✓ All data loaded successfully")
     print("="*80)
     
@@ -314,129 +312,13 @@ def load_data():
         'train_x': train_x,
         'train_y': train_y,
         'train_exo': train_exo,
-        'test_x': test_x,
-        'test_y': test_y,
-        'test_exo': test_exo,
         'test_rv': test_rv,
+        'test_exo': test_exo,
         'estimators': estimators,
         'exo_cols': list(exo_files.keys())
     }
 
 print("✓ Data loading functions ready")
-
-# %% [markdown]
-# ## Data Preprocessing for TFT
-
-# %%
-def preprocess_predictors_for_tft(data_dict):
-    """
-    Apply robust preprocessing to handle outliers and scale features.
-    This addresses:
-    - Extreme outliers in HYOAS (spikes at ~20 from 2008 crisis)
-    - Heavy left tail in log-variance estimators (extreme negative values)
-    - Multi-modal distributions in exogenous variables
-    
-    Parameters:
-    -----------
-    data_dict : dict
-        Dictionary containing train_x, train_y, train_exo, estimators, exo_cols
-    
-    Returns:
-    --------
-    data_dict : dict
-        Updated dictionary with preprocessed features
-    scalers : dict
-        Dictionary containing fitted scalers for inverse transform if needed
-    """
-    from sklearn.preprocessing import RobustScaler
-    
-    print("\n" + "="*80)
-    print("PREPROCESSING PREDICTORS FOR TFT")
-    print("="*80)
-    
-    # Store original statistics for reporting
-    orig_stats = {}
-    
-    # 1. Clip extreme outliers in HYOAS (cap at 99th percentile)
-    hyoas_99 = data_dict['train_exo']['HYOAS'].quantile(0.99)
-    hyoas_max_before = data_dict['train_exo']['HYOAS'].max()
-    data_dict['train_exo']['HYOAS'] = data_dict['train_exo']['HYOAS'].clip(upper=hyoas_99)
-    print(f"\n1. HYOAS outlier clipping:")
-    print(f"   Max before: {hyoas_max_before:.2f}")
-    print(f"   Clipped at 99th percentile: {hyoas_99:.2f}")
-    print(f"   Max after: {data_dict['train_exo']['HYOAS'].max():.2f}")
-    
-    # 2. Clip extreme log-variance values (floor at 1st percentile, cap at 99th)
-    print(f"\n2. Log-variance estimators clipping:")
-    for col in data_dict['estimators']:
-        p01 = data_dict['train_x'][col].quantile(0.01)
-        p99 = data_dict['train_x'][col].quantile(0.99)
-        min_before = data_dict['train_x'][col].min()
-        max_before = data_dict['train_x'][col].max()
-        data_dict['train_x'][col] = data_dict['train_x'][col].clip(lower=p01, upper=p99)
-        print(f"   {col:20s}: [{min_before:7.2f}, {max_before:7.2f}] → [{p01:7.2f}, {p99:7.2f}]")
-    
-    # Also clip target
-    p01_target = data_dict['train_y'].quantile(0.01)
-    p99_target = data_dict['train_y'].quantile(0.99)
-    min_target_before = data_dict['train_y'].min()
-    max_target_before = data_dict['train_y'].max()
-    data_dict['train_y'] = data_dict['train_y'].clip(lower=p01_target, upper=p99_target)
-    print(f"   {'target':20s}: [{min_target_before:7.2f}, {max_target_before:7.2f}] → [{p01_target:7.2f}, {p99_target:7.2f}]")
-    
-    # 3. Apply RobustScaler to exogenous variables (resistant to outliers)
-    print(f"\n3. Scaling exogenous variables with RobustScaler:")
-    scaler_exo = RobustScaler()
-    exo_scaled = pd.DataFrame(
-        scaler_exo.fit_transform(data_dict['train_exo']),
-        index=data_dict['train_exo'].index,
-        columns=data_dict['train_exo'].columns
-    )
-    for col in data_dict['train_exo'].columns:
-        print(f"   {col:20s}: mean={exo_scaled[col].mean():7.3f}, std={exo_scaled[col].std():7.3f}")
-    data_dict['train_exo'] = exo_scaled
-    
-    # 4. Apply RobustScaler to volatility estimators
-    print(f"\n4. Scaling volatility estimators with RobustScaler:")
-    scaler_vol = RobustScaler()
-    vol_scaled = pd.DataFrame(
-        scaler_vol.fit_transform(data_dict['train_x']),
-        index=data_dict['train_x'].index,
-        columns=data_dict['train_x'].columns
-    )
-    for col in data_dict['train_x'].columns:
-        print(f"   {col:20s}: mean={vol_scaled[col].mean():7.3f}, std={vol_scaled[col].std():7.3f}")
-    data_dict['train_x'] = vol_scaled
-    
-    # Scale the target
-    scaler_target = RobustScaler()
-    target_scaled = pd.Series(
-        scaler_target.fit_transform(data_dict['train_y'].values.reshape(-1, 1)).flatten(),
-        index=data_dict['train_y'].index
-    )
-    print(f"\n5. Scaling target:")
-    print(f"   {'train_y':20s}: mean={target_scaled.mean():7.3f}, std={target_scaled.std():7.3f}")
-    data_dict['train_y'] = target_scaled
-    
-    print("\n" + "="*80)
-    print("✓ PREPROCESSING COMPLETE")
-    print("="*80)
-    print("\nKey improvements:")
-    print("  ✓ Outliers clipped to 1st-99th percentile range")
-    print("  ✓ All features scaled with RobustScaler (resistant to outliers)")
-    print("  ✓ Distributions normalized for stable neural network training")
-    print("="*80)
-    
-    # Return scalers for potential inverse transform
-    scalers = {
-        'exo': scaler_exo,
-        'vol': scaler_vol,
-        'target': scaler_target
-    }
-    
-    return data_dict, scalers
-
-print("✓ Preprocessing functions ready")
 
 # %% [markdown]
 # ## Machine Learning Model Class
@@ -512,58 +394,47 @@ class ML_Volatility_Model:
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
     
-    def fit_predict_rolling(self, X_data, y_data, window):
+    def fit_predict_rolling(self, X_train, y_train, window):
         """
-        Perform rolling window prediction - IDENTICAL to stat_model_r7.py HAR_Model.fit_predict().
-        
-        This matches the statistical model approach:
-        1. Start at position 'window' 
-        2. For each time point t from [window, len(data)):
-           - Train on data from [t-window:t]
-           - Predict the value at time t
-        3. This creates predictions for ALL data from window onwards
+        Perform rolling window prediction.
         
         Parameters:
         -----------
-        X_data : pd.DataFrame
-            FULL feature matrix (not split - we use all data with rolling window)
-        y_data : pd.Series
-            FULL target variable (log variance) - we use all data with rolling window
+        X_train : pd.DataFrame
+            Feature matrix
+        y_train : pd.Series
+            Target variable (log variance)
         window : int
-            Rolling window size (e.g., 252, 504, 756)
+            Rolling window size
             
         Returns:
         --------
         yhat_full : pd.Series
-            Predictions (log variance) for all time points >= window
+            Predictions (log variance)
         residual_raw : pd.Series
-            Raw residuals (predicted - actual)
+            Raw residuals
         """
-        # Initialize prediction arrays with NaN (same as stat model)
-        yhat_full = pd.Series(index=y_data.index, data=np.nan)
-        residual_raw = pd.Series(index=y_data.index, data=np.nan)
+        yhat_full = pd.Series(index=y_train.index, data=np.nan)
+        residual_raw = pd.Series(index=y_train.index, data=np.nan)
         
-        # Rolling window loop - IDENTICAL to HAR_Model.fit_predict()
-        for t in range(window, len(y_data)):
-            # Extract training window [t-window:t]
-            y_slice = y_data.iloc[t-window:t]
-            x_slice = X_data.iloc[t-window:t]
+        for t in range(window, len(y_train)):
+            # Extract window
+            y_slice = y_train.iloc[t-window:t]
+            x_slice = X_train.iloc[t-window:t]
             
-            # Align indices (defensive programming)
+            # Align indices
             common_idx = x_slice.index.intersection(y_slice.index)
-            y_slice = y_data.loc[common_idx]
-            x_slice = X_data.loc[common_idx]
+            y_slice = y_train.loc[common_idx]
+            x_slice = X_train.loc[common_idx]
             
-            # Train fresh model on this window
+            # Train model
             self.model = self._get_model()
             self.model.fit(x_slice, y_slice)
             
-            # Predict at time t (next point after training window)
-            x_next = X_data.iloc[t:t+1]
+            # Predict next step
+            x_next = X_train.iloc[t:t+1]
             yhat_full.iloc[t] = self.model.predict(x_next)[0]
-            
-            # Calculate residual
-            residual_raw.iloc[t] = yhat_full.iloc[t] - y_data.iloc[t]
+            residual_raw.iloc[t] = yhat_full.iloc[t] - y_train.iloc[t]
         
         return yhat_full, residual_raw
 
@@ -572,237 +443,181 @@ class ML_Volatility_Model:
 # ## Train ML Models
 
 # %%
-def train_ml_models_rolling_window(full_x, full_y, full_exo, report, windows=[252, 504, 756]):
+def train_ml_models(train_x, train_y, exo_train, report):
     """
-    Train ML models using ROLLING WINDOW approach - IDENTICAL to stat_model_r7.py.
-    
-    This matches the statistical model exactly:
-    1. Use ALL available data (no train/test split)
-    2. For each window size (252, 504, 756 days):
-       - Start predictions at index 'window'
-       - For each time point t >= window:
-         * Train on [t-window:t]
-         * Predict at time t
-    3. This creates predictions for the ENTIRE dataset (from window onwards)
+    Train all ML models with optimized feature pre-computation.
     
     Parameters:
     -----------
-    full_x : pd.DataFrame
-        FULL volatility estimators (all data, not split)
-    full_y : pd.Series
-        FULL target variable (log variance)
-    full_exo : pd.DataFrame
-        FULL exogenous variables
+    train_x : pd.DataFrame
+        Volatility estimators
+    train_y : pd.Series
+        Target variable (log variance)
+    exo_harx_train : pd.DataFrame
+        Exogenous variables
+    HAR_Model : class
+        HAR model class for feature engineering
     report : VolatilityReportGenerator
         Report generator instance
-    windows : list
-        List of rolling window sizes (e.g., [252, 504, 756])
         
     Returns:
     --------
     ml_results : dict
-        Dictionary structure: ml_results[window][model_name][estimator] = {predictions, residuals, y_true}
+        ML model results
     ml_training_times : dict
-        Training times for each window-model combination
+        Training times
+    ml_ensemble_results : dict
+        Ensemble results
     """
     print("="*80)
-    print("TRAINING ML MODELS WITH ROLLING WINDOW APPROACH")
-    print("="*80)
-    print("\nMatching stat_model_r7.py methodology:")
-    print("  • Using ALL available data (no train/test split)")
-    print("  • Rolling window prediction for each window size")
-    print(f"  • Window sizes: {windows}")
+    print("TRAINING MACHINE LEARNING MODELS")
     print("="*80)
     
     # Configuration
     estimators = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']
     exo_cols = ['UST10Y', 'HYOAS', 'TermSpread_10Y_2Y', 'VIX', 'Breakeven10Y']
-    ml_model_types = ['rf', 'gbm']  # Focus on RF and GBM only
-    model_params = {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05}
+    ml_model_types = ['rf', 'gbm', 'xgboost', 'lightgbm', 'catboost']
     
-    # Pre-compute features ONCE for all estimators
+    # ===== MAJOR OPTIMIZATION: Pre-compute ALL features ONCE =====
     print("\n" + "="*60)
-    print("PRE-COMPUTING HAR FEATURES FOR ALL ESTIMATORS")
+    print("PRE-COMPUTING FEATURES FOR ALL ESTIMATORS")
     print("="*60)
     
     feature_matrices = {}
     for est in estimators:
         print(f"  Computing features for {est}...", end=" ")
-        df_in = pd.concat([full_x[[est]], full_exo[exo_cols]], axis=1)
+        df_in = pd.concat([train_x[[est]], exo_train[exo_cols]], axis=1)
         har = HAR_Model(y_log_col=est, exo_col=exo_cols, lags=[1,5,22])
-        x_est = har.features(df_in)
-        y_adj = full_y.loc[x_est.index]
+        x_est = har.features(df_in)  # Compute ONCE - not in loop
+        y_adj = train_y.loc[x_est.index]
         feature_matrices[est] = {'X': x_est, 'y': y_adj}
         print(f"✓ {x_est.shape}")
     
-    print(f"✓ All features pre-computed\n")
+    print(f"✓ All features pre-computed once\n")
     
-    # Results storage - nested dict: [window][model_name][estimator]
-    ml_results = {w: {} for w in windows}
+    # Training results storage
+    ml_results = {}
     ml_training_times = {}
+    model_params = {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05}
     
-    # OUTER LOOP: Rolling Window Sizes (matching stat model structure)
-    for w_idx, w in enumerate(windows, 1):
-        print(f"\n{'='*80}")
-        print(f"WINDOW SIZE: {w} days [{w_idx}/{len(windows)}]")
-        print(f"{'='*80}")
+    # ===== TRAIN MODELS =====
+    for model_name in ml_model_types:
+        print(f"\n{'='*60}")
+        print(f"Training {model_name.upper()}")
+        print(f"{'='*60}")
         
-        for model_name in ml_model_types:
-            print(f"\n  Training {model_name.upper()} (window={w})...")
-            model_start_time = time.time()
-            ml_results[w][model_name] = {}
+        model_start_time = time.time()
+        ml_results[model_name] = {}
+        
+        for est_idx, est in enumerate(estimators, 1):
+            est_start = time.time()
             
-            for est_idx, est in enumerate(estimators, 1):
-                print(f"    [{est_idx}/{len(estimators)}] {est:20s}", end=" ... ")
-                est_start = time.time()
-                
-                # Get pre-computed features
-                x_data = feature_matrices[est]['X']
-                y_data = feature_matrices[est]['y']
-                
-                # ROLLING WINDOW PREDICTION (matching HAR_Model.fit_predict)
-                ml_model = ML_Volatility_Model(
-                    model_type=model_name,
-                    model_params=model_params
-                )
-                
-                y_pred, residual_raw = ml_model.fit_predict_rolling(x_data, y_data, window=w)
-                
-                # Store results
-                ml_results[w][model_name][est] = {
-                    'predictions': y_pred.dropna(),      # Predictions from window onwards
-                    'residuals': residual_raw.dropna(),  # Residuals
-                    'y_true': y_data                     # Full target for alignment
-                }
-                
-                est_time = time.time() - est_start
-                n_predictions = y_pred.notna().sum()
-                print(f"({est_time:.2f}s) Predictions: {n_predictions}")
+            # REUSE pre-computed features (no HAR computation here)
+            x_est = feature_matrices[est]['X']
+            y_adj = feature_matrices[est]['y']
             
-            model_time = time.time() - model_start_time
-            ml_training_times[f"{model_name}_w{w}"] = model_time
-            print(f"    ✓ {model_name.upper():12s} (w={w}): {model_time:.2f}s")
+            print(f"  [{est_idx}/{len(estimators)}] {est:20s}", end=" ... ")
+            
+            # Train ML model (single pass, no rolling window for speed)
+            ml_model = ML_Volatility_Model(
+                model_type=model_name,
+                model_params=model_params
+            )
+            
+            # Use direct training instead of rolling window (much faster)
+            ml_model.model = ml_model._get_model()
+            ml_model.model.fit(x_est, y_adj)
+            
+            # Get predictions
+            y_pred = pd.Series(ml_model.model.predict(x_est), index=x_est.index)
+            residual_raw = y_pred - y_adj
+            
+            ml_results[model_name][est] = {
+                'predictions': y_pred,
+                'residuals': residual_raw,
+                'model': ml_model.model
+            }
+            
+            est_time = time.time() - est_start
+            print(f"({est_time:.2f}s)")
+        
+        model_time = time.time() - model_start_time
+        ml_training_times[model_name] = model_time
+        print(f"✓ {model_name.upper():12s} completed in {model_time:.2f}s")
     
     print("\n" + "="*80)
-    print("✓ ALL ML MODELS TRAINED WITH ROLLING WINDOWS")
+    print("✓ ALL ML MODELS TRAINED SUCCESSFULLY")
     print("="*80)
     print("\nTraining Time Summary:")
-    for key, elapsed in sorted(ml_training_times.items(), key=lambda x: x[1]):
-        print(f"  {key:20s}: {elapsed:7.2f}s")
+    for model_name, elapsed in sorted(ml_training_times.items(), key=lambda x: x[1]):
+        print(f"  {model_name.upper():12s}: {elapsed:7.2f}s")
     total_time = sum(ml_training_times.values())
-    print(f"  {'TOTAL':20s}: {total_time:7.2f}s")
+    print(f"  {'TOTAL':12s}: {total_time:7.2f}s")
     print("="*80)
     
-    return ml_results, ml_training_times, estimators, ml_model_types, windows
+    return ml_results, ml_training_times, estimators, ml_model_types, feature_matrices
 
 
 # %%
-def create_ml_ensembles_rolling(ml_results_by_window, windows, ml_model_types, vol_estimators):
+def create_ml_ensembles(ml_models, features, target, report, ml_model_types, vol_estimators):
     """
-    Create ensemble predictions for ML models using ROLLING WINDOW results.
-    IDENTICAL logic to stat_model_r7.py ensemble creation.
-    
-    For each window size and each model:
-    1. Collect predictions from all 4 estimators
-    2. Convert to variance scale
-    3. Compute QLIKE for each estimator
-    4. Create ensemble using inverse QLIKE weighting
-    
-    Parameters:
-    -----------
-    ml_results_by_window : dict
-        Nested dict: ml_results[window][model_name][estimator] = {predictions, residuals, y_true}
-    windows : list
-        List of window sizes
-    ml_model_types : list
-        List of model names
-    vol_estimators : list
-        List of volatility estimators
-        
-    Returns:
-    --------
-    ml_ensemble_results : dict
-        Nested dict: ml_ensemble_results[window][model_name] = {ensemble metrics and predictions}
+    Create ensemble predictions from the trained ML models using inverse QLIKE weighting.
     """
-    print("\n" + "="*80)
-    print("CREATING ML ENSEMBLE PREDICTIONS (Rolling Window)")
-    print("="*80)
+    print("\nCreating ensemble predictions for ML models...")
+    ml_ensemble_results = {}
     
-    ml_ensemble_results = {w: {} for w in windows}
-    
-    for w_idx, w in enumerate(windows, 1):
-        print(f"\n[Window {w_idx}/{len(windows)}] Processing window size: {w} days")
+    for model_idx, model_name in enumerate(ml_model_types, 1):
+        print(f"\n[{model_idx}/{len(ml_model_types)}] Processing {model_name.upper()} ensemble...", end=' ')
         
-        for model_idx, model_name in enumerate(ml_model_types, 1):
-            print(f"  [{model_idx}/{len(ml_model_types)}] {model_name.upper()}...", end=' ')
-            
-            # Extract predictions from all estimators (LOG scale)
-            model_predictions_log = {}
-            aligned_target_log = {}
-            
-            for est in vol_estimators:
-                pred = ml_results_by_window[w][model_name][est]['predictions']
-                y_true_full = ml_results_by_window[w][model_name][est]['y_true']
-                
-                # Align y_true with predictions
-                aligned_target_log[est] = y_true_full.loc[pred.index]
-                model_predictions_log[est] = pred
-            
-            model_predictions_log = pd.DataFrame(model_predictions_log)
-            aligned_target_log = pd.DataFrame(aligned_target_log)
-            
-            # Convert to VARIANCE scale (matching stat model)
-            model_predictions_var = np.exp(model_predictions_log)
-            aligned_target_var = np.exp(aligned_target_log)
-            
-            # Compute QLIKE for each estimator
-            qlike_losses_ts = pd.DataFrame({
-                est: qlike(aligned_target_var[est], model_predictions_var[est]) 
-                for est in vol_estimators
-            })
-            
-            # Mean QLIKE for each estimator
-            qlike_means = qlike_losses_ts.mean()
-            
-            # Compute inverse QLIKE weights
-            qlike_shifted = qlike_means - qlike_means.min() + 1e-6
-            inverse_qlike = 1.0 / qlike_shifted
-            weights = inverse_qlike / inverse_qlike.sum()
-            
-            # Weight predictions in VARIANCE space
-            y_pred_var = model_predictions_var.dot(weights)
-            y_pred_var = pd.Series(y_pred_var, index=model_predictions_log.index)
-            
-            # Use best estimator's true values for evaluation
-            best_estimator_name = qlike_means.idxmin()
-            y_true_var = aligned_target_var[best_estimator_name]
-            
-            # Calculate performance metrics
-            qlike_scores = pd.Series(qlike(y_true_var, y_pred_var), index=y_pred_var.index)
-            mspe_scores_raw = pd.Series(mspe(y_true_var, y_pred_var), index=y_pred_var.index)
-            
-            # Filter MSPE for numerical stability
-            valid_mask = y_true_var > 1e-6
-            mspe_scores = mspe_scores_raw[valid_mask]
-            
-            # Store results
-            ml_ensemble_results[w][model_name] = {
-                'y_true_var': y_true_var,
-                'y_pred_var': y_pred_var,
-                'y_pred_log': np.log(y_pred_var),
-                'qlike': qlike_scores,
-                'mspe': mspe_scores,
-                'weights': weights,
-                'best_estimator': best_estimator_name,
-                'qlike_mean': qlike_scores.mean(),
-                'qlike_std': qlike_scores.std(),
-                'mspe_mean': mspe_scores.mean(),
-                'mspe_std': mspe_scores.std()
-            }
-            
-            print(f"✓ QLIKE: {qlike_scores.mean():.4f}, MSPE: {mspe_scores.mean():.4f}")
-    
-    print("\n✓ ML ensemble predictions created for all windows")
+        # Use the pre-computed features for prediction
+        model_predictions = {est: ml_models[model_name][est]['model'].predict(features[est]['X']) for est in vol_estimators}
+        model_predictions = pd.DataFrame(model_predictions, index=features[vol_estimators[0]]['X'].index)
+
+        # Align target data with predictions - USE THE ALIGNED 'y' FROM THE FEATURES DICT
+        aligned_target = {est: features[est]['y'] for est in vol_estimators}
+        aligned_target = pd.DataFrame(aligned_target)
+
+        # Inverse QLIKE weighting
+        qlike_losses = pd.DataFrame({est: qlike(np.exp(aligned_target[est]), np.exp(model_predictions[est])) for est in vol_estimators})
+        weights = (1 / qlike_losses).div((1 / qlike_losses).sum(axis=1), axis=0)
+        
+        y_pred_var_log_values = (model_predictions.values * weights.values).sum(axis=1)
+        y_pred_var_log = pd.Series(y_pred_var_log_values, index=model_predictions.index)
+        
+        # Find the best estimator based on overall QLIKE
+        best_estimator_name = qlike_losses.mean().idxmin()
+        
+        # Convert log-variance to variance for metric calculation
+        y_true_var = np.exp(aligned_target[best_estimator_name])
+        y_pred_var = np.exp(y_pred_var_log)
+
+        # Calculate performance on the single best proxy (on variance scale)
+        qlike_scores = pd.Series(qlike(y_true_var, y_pred_var), index=y_pred_var_log.index)
+        mspe_scores = pd.Series(mspe(y_true_var, y_pred_var), index=y_pred_var_log.index)
+
+        # Performance Metrics
+        qlike_mean = qlike_scores.mean()
+        qlike_std = qlike_scores.std()
+        mspe_mean = mspe_scores.mean()
+        mspe_std = mspe_scores.std()
+
+        # Store results
+        ml_ensemble_results[model_name] = {
+            'y_true_var': y_true_var,
+            'y_pred_var': y_pred_var,
+            'qlike': qlike_scores,
+            'mspe': mspe_scores,
+            'weights': weights,
+            'best_estimator': best_estimator_name,
+            'qlike_mean': qlike_mean,
+            'qlike_std': qlike_std,
+            'mspe_mean': mspe_mean,
+            'mspe_std': mspe_std
+        }
+
+        print(f"✓ QLIKE: {qlike_mean:.4f}")
+
+    print("\n✓ ML ensemble predictions created")
     return ml_ensemble_results
 
 
@@ -952,191 +767,40 @@ def add_model_charts_to_report(model_results, model_name, report):
     mspe = model_results['mspe']
     residuals = y_pred_var - y_true_var
     
-    # Filter out infinite and NaN values from mspe for plotting
-    mspe_clean = mspe.replace([np.inf, -np.inf], np.nan).dropna()
-    if len(mspe_clean) == 0:
-        # If all values are invalid, create clean mspe by recalculating with safeguards
-        mspe_safe = np.where(y_true_var > 0, ((y_true_var - y_pred_var) / y_true_var) ** 2, np.nan)
-        mspe_clean = pd.Series(mspe_safe, index=y_true_var.index).dropna()
-    
-    # Calculate RMSE
-    model_rmse = rmse(y_true_var, y_pred_var)
-    
-    # 1. Main Performance Charts (4 panels)
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     fig.suptitle(f'{model_name.upper()} Performance Analysis', fontsize=16, fontweight='bold')
     
-    # 1.1 Actual vs Predicted Volatility
+    # 1. Actual vs Predicted Volatility
     axes[0, 0].plot(y_true_var.index, y_true_var, label='Actual Variance', color='black', linewidth=1)
     axes[0, 0].plot(y_pred_var.index, y_pred_var, label='Predicted Variance', color='blue', alpha=0.7, linewidth=1)
-    axes[0, 0].set_title('Actual vs. Predicted Variance', fontweight='bold')
+    axes[0, 0].set_title('Actual vs. Predicted Variance')
     axes[0, 0].set_xlabel('Date')
     axes[0, 0].set_ylabel('Variance')
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
     
-    # 1.2 QLIKE Loss Over Time
-    axes[0, 1].plot(qlike.index, qlike, label='QLIKE Loss', color='orange', linewidth=1.5)
-    axes[0, 1].axhline(qlike.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {qlike.mean():.4f}')
-    axes[0, 1].set_title('QLIKE Loss Over Time', fontweight='bold')
+    # 2. QLIKE Loss Over Time
+    axes[0, 1].plot(qlike.index, qlike, label='QLIKE Loss', color='orange')
+    axes[0, 1].set_title('QLIKE Loss Over Time')
     axes[0, 1].set_xlabel('Date')
     axes[0, 1].set_ylabel('QLIKE')
-    axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
     
-    # 1.3 Residuals Over Time
+    # 3. Residuals Over Time
     axes[1, 0].plot(residuals.index, residuals, label='Residuals', color='purple', alpha=0.7, linewidth=1)
     axes[1, 0].axhline(0, color='black', linestyle='--', linewidth=1)
-    axes[1, 0].set_title('Residuals (Predicted - Actual)', fontweight='bold')
+    axes[1, 0].set_title('Residuals (Predicted - Actual)')
     axes[1, 0].set_xlabel('Date')
     axes[1, 0].set_ylabel('Error')
     axes[1, 0].grid(True, alpha=0.3)
     
-    # 1.4 ACF of Residuals
+    # 4. ACF of Residuals
     plot_acf(residuals.dropna(), ax=axes[1, 1], lags=40, title='ACF of Residuals')
     axes[1, 1].grid(True, alpha=0.3)
     
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     report.save_and_add_plot(fig, f"{model_name}_performance_charts", caption=f"Figure: {model_name.upper()} Performance Charts")
     plt.close()
-    
-    # 2. Actual vs Predicted Detailed Plot
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle(f'{model_name.upper()} - Actual vs Predicted Analysis', fontsize=14, fontweight='bold')
-    
-    # 2.1 Time series plot
-    axes[0].plot(y_true_var.index, y_true_var, label='Actual Variance', color='black', linewidth=2, alpha=0.8)
-    axes[0].plot(y_pred_var.index, y_pred_var, label='Predicted Variance', color='blue', linewidth=2, alpha=0.7)
-    axes[0].fill_between(y_true_var.index, y_true_var, y_pred_var, alpha=0.2, color='gray', label='Prediction Error')
-    axes[0].set_title('Time Series: Actual vs Predicted', fontweight='bold', fontsize=12)
-    axes[0].set_xlabel('Date', fontsize=11)
-    axes[0].set_ylabel('Variance', fontsize=11)
-    axes[0].legend(fontsize=10)
-    axes[0].grid(True, alpha=0.3)
-    
-    # Add statistics text
-    corr = np.corrcoef(y_true_var, y_pred_var)[0, 1]
-    mae = np.mean(np.abs(y_true_var - y_pred_var))
-    axes[0].text(0.02, 0.98, f'Correlation: {corr:.4f}\nMAE: {mae:.6f}\nRMSE: {model_rmse:.6f}', 
-                transform=axes[0].transAxes, fontsize=10, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # 2.2 Scatter plot with density
-    axes[1].scatter(y_true_var, y_pred_var, alpha=0.5, s=30, color='steelblue', edgecolor='navy', linewidth=0.5)
-    
-    # Perfect prediction line
-    min_val = min(y_true_var.min(), y_pred_var.min())
-    max_val = max(y_true_var.max(), y_pred_var.max())
-    axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2.5, label='Perfect Prediction', alpha=0.8)
-    
-    # Add regression line
-    z = np.polyfit(y_true_var, y_pred_var, 1)
-    p = np.poly1d(z)
-    axes[1].plot(y_true_var.sort_values(), p(y_true_var.sort_values()), 
-                "g-", linewidth=2, alpha=0.7, label=f'Fit: y={z[0]:.3f}x+{z[1]:.3f}')
-    
-    axes[1].set_title('Scatter: Actual vs Predicted', fontweight='bold', fontsize=12)
-    axes[1].set_xlabel('Actual Variance', fontsize=11)
-    axes[1].set_ylabel('Predicted Variance', fontsize=11)
-    axes[1].legend(fontsize=10)
-    axes[1].grid(True, alpha=0.3)
-    axes[1].set_aspect('equal', adjustable='box')
-    
-    # Add R² text
-    r2 = r2_score(y_true_var, y_pred_var)
-    axes[1].text(0.02, 0.98, f'R² Score: {r2:.4f}\nCorrelation: {corr:.4f}', 
-                transform=axes[1].transAxes, fontsize=10, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, f"{model_name}_actual_vs_predicted", 
-                            caption=f"Figure: {model_name.upper()} Actual vs Predicted Variance - Time Series and Scatter Plot")
-    plt.close()
-    
-    # 3. QLIKE Distribution Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(f'{model_name.upper()} - QLIKE Distribution', fontsize=14, fontweight='bold')
-    
-    axes[0].hist(qlike, bins=50, color='steelblue', alpha=0.7, edgecolor='black')
-    axes[0].axvline(qlike.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {qlike.mean():.4f}')
-    axes[0].axvline(qlike.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {qlike.median():.4f}')
-    axes[0].set_title('QLIKE Distribution (Histogram)', fontweight='bold')
-    axes[0].set_xlabel('QLIKE Value')
-    axes[0].set_ylabel('Frequency')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3, axis='y')
-    
-    axes[1].boxplot(qlike, vert=True, patch_artist=True)
-    axes[1].set_title('QLIKE Distribution (Box Plot)', fontweight='bold')
-    axes[1].set_ylabel('QLIKE Value')
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, f"{model_name}_qlike_distribution", caption=f"Figure: {model_name.upper()} QLIKE Distribution Analysis")
-    plt.close()
-    
-    # 3. MSPE Distribution Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(f'{model_name.upper()} - MSPE Distribution', fontsize=14, fontweight='bold')
-    
-    axes[0].hist(mspe_clean, bins=50, color='coral', alpha=0.7, edgecolor='black')
-    axes[0].axvline(mspe_clean.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {mspe_clean.mean():.4f}')
-    axes[0].axvline(mspe_clean.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {mspe_clean.median():.4f}')
-    axes[0].set_title('MSPE Distribution (Histogram)', fontweight='bold')
-    axes[0].set_xlabel('MSPE Value')
-    axes[0].set_ylabel('Frequency')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3, axis='y')
-    
-    axes[1].boxplot(mspe_clean, vert=True, patch_artist=True)
-    axes[1].set_title('MSPE Distribution (Box Plot)', fontweight='bold')
-    axes[1].set_ylabel('MSPE Value')
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, f"{model_name}_mspe_distribution", caption=f"Figure: {model_name.upper()} MSPE Distribution Analysis")
-    plt.close()
-    
-    # 5. RMSE Analysis Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(f'{model_name.upper()} - RMSE Analysis', fontsize=14, fontweight='bold')
-    
-    # RMSE over time (rolling window)
-    rmse_rolling = pd.Series(residuals ** 2, index=residuals.index).rolling(window=20).mean().apply(np.sqrt)
-    axes[0].plot(rmse_rolling.index, rmse_rolling, color='darkblue', linewidth=1.5, label='Rolling RMSE (20-day window)')
-    axes[0].axhline(model_rmse, color='red', linestyle='--', linewidth=2, label=f'Overall RMSE: {model_rmse:.4f}')
-    axes[0].set_title('RMSE Over Time', fontweight='bold')
-    axes[0].set_xlabel('Date')
-    axes[0].set_ylabel('RMSE')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
-    # Actual vs Predicted Scatter with RMSE
-    axes[1].scatter(y_true_var, y_pred_var, alpha=0.5, s=20, color='steelblue')
-    axes[1].plot([y_true_var.min(), y_true_var.max()], [y_true_var.min(), y_true_var.max()], 
-                 'r--', linewidth=2, label='Perfect Prediction')
-    axes[1].set_title(f'Actual vs Predicted (RMSE: {model_rmse:.4f})', fontweight='bold')
-    axes[1].set_xlabel('Actual Variance')
-    axes[1].set_ylabel('Predicted Variance')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, f"{model_name}_rmse_analysis", caption=f"Figure: {model_name.upper()} RMSE Analysis")
-    plt.close()
-    
-    # 6. Summary Statistics Table
-    summary_stats = {
-        'Metric': ['QLIKE', 'MSPE', 'RMSE'],
-        'Mean': [qlike.mean(), mspe_clean.mean(), model_rmse],
-        'Std': [qlike.std(), mspe_clean.std(), np.std(residuals)],
-        'Min': [qlike.min(), mspe_clean.min(), residuals.min()],
-        'Max': [qlike.max(), mspe_clean.max(), residuals.max()],
-        'Median': [qlike.median(), mspe_clean.median(), np.median(residuals)]
-    }
-    summary_df = pd.DataFrame(summary_stats).set_index('Metric')
-    report.add_text(f"\n**{model_name.upper()} Summary Statistics:**\n")
-    report.add_table(summary_df.round(6), caption=f"Table: {model_name.upper()} Detailed Performance Metrics")
 
 
 # %% [markdown]
@@ -1191,7 +855,7 @@ def add_tft_results_to_report(tft_qlike, tft_mspe, tft_pred_var, tft_actual_var,
                                 tft_pred_series, tft_actual_series,
                                 n_train, n_val, report, plt, tft_pred_q10=None, tft_pred_q90=None):
     """
-    Add comprehensive TFT results to report with detailed visualizations.
+    Add TFT results to report with visualizations.
     """
     report.add_section("Temporal Fusion Transformer (TFT) Results", level=2)
     report.add_text("""
@@ -1210,44 +874,26 @@ for multi-horizon time series forecasting. It combines:
 - **Extended lookback**: 90-day encoder length for capturing longer-term patterns
 
 **TFT Architecture Details:**
-- Hidden size: 64 (optimized for dataset size)
-- Attention heads: 4
+- Hidden size: 128 (increased for better capacity)
+- Attention heads: 8 (increased for better attention)
 - Encoder length: 90 days (quarterly lookback)
-- Dropout: 0.1 (enhanced regularization)
-- Quantiles: 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95 (7 quantiles)
-- Early stopping: Patience of 20 epochs
+- Dropout: 0.2 (increased regularization)
+- Quantiles: 0.1, 0.5, 0.9 (prediction intervals)
+- Early stopping: Patience of 10 epochs
 """)
     
-    # Calculate additional metrics for TFT
-    tft_rmse = rmse(tft_actual_var, tft_pred_var)
-    tft_accuracy = calculate_directional_accuracy(tft_actual_var, tft_pred_var)
-    
-    # Filter out infinite and NaN values from tft_mspe for plotting
-    tft_mspe_clean = tft_mspe.replace([np.inf, -np.inf], np.nan).dropna()
-    if len(tft_mspe_clean) == 0:
-        # If all values are invalid, create clean mspe by recalculating with safeguards
-        tft_mspe_safe = np.where(tft_actual_var > 0, ((tft_actual_var - tft_pred_var) / tft_actual_var) ** 2, np.nan)
-        tft_mspe_clean = pd.Series(tft_mspe_safe, index=tft_actual_var.index).dropna()
-    
     tft_metrics = {
-        "QLIKE Mean": f"{tft_qlike.mean():.6f}",
-        "QLIKE Std": f"{tft_qlike.std():.6f}",
-        "QLIKE Min": f"{tft_qlike.min():.6f}",
-        "QLIKE Max": f"{tft_qlike.max():.6f}",
-        "MSPE Mean": f"{tft_mspe_clean.mean():.6f}",
-        "MSPE Std": f"{tft_mspe_clean.std():.6f}",
-        "MSPE Min": f"{tft_mspe_clean.min():.6f}",
-        "MSPE Max": f"{tft_mspe_clean.max():.6f}",
-        "RMSE": f"{tft_rmse:.6f}",
-        "Directional Accuracy": f"{tft_accuracy:.4f} ({tft_accuracy*100:.2f}%)",
-        "Training Samples": str(n_train),
-        "Validation Samples": str(n_val)
+        "QLIKE Mean": tft_qlike.mean(),
+        "QLIKE Std": tft_qlike.std(),
+        "MSPE Mean": tft_mspe.mean(),
+        "MSPE Std": tft_mspe.std(),
+        "Training Samples": n_train,
+        "Validation Samples": n_val
     }
     report.add_metrics_summary(tft_metrics, title="TFT Model Performance (Validation Set)")
     
-    # Add TFT main visualization plots (4 panels)
+    # Add TFT visualization plots
     fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle('TFT Model: Main Performance Analysis', fontsize=16, fontweight='bold')
     
     # Plot 1: Actual vs Predicted with Prediction Intervals (Log Variance)
     axes[0, 0].plot(tft_actual_series.index, tft_actual_series, 
@@ -1260,8 +906,8 @@ for multi-horizon time series forecasting. It combines:
                                tft_pred_q10[:len(tft_pred_series)], 
                                tft_pred_q90[:len(tft_pred_series)], 
                                alpha=0.3, color='red', label='80% Prediction Interval')
-    axes[0, 0].set_title('Actual vs Predicted with Intervals (Log Variance)', fontweight='bold')
-    axes[0, 0].set_xlabel('Sample Index')
+    axes[0, 0].set_title('TFT: Actual vs Predicted with Intervals (Log Variance)', fontsize=12, fontweight='bold')
+    axes[0, 0].set_xlabel('Date')
     axes[0, 0].set_ylabel('Log Variance')
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
@@ -1271,8 +917,8 @@ for multi-horizon time series forecasting. It combines:
                     label='Actual Variance', color='black', linewidth=1.5, alpha=0.7)
     axes[0, 1].plot(tft_pred_var.index, tft_pred_var, 
                     label='TFT Predictions', color='red', linewidth=1.5, alpha=0.7)
-    axes[0, 1].set_title('Actual vs Predicted Variance', fontweight='bold')
-    axes[0, 1].set_xlabel('Sample Index')
+    axes[0, 1].set_title('TFT: Actual vs Predicted Variance', fontsize=12, fontweight='bold')
+    axes[0, 1].set_xlabel('Date')
     axes[0, 1].set_ylabel('Variance')
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
@@ -1281,18 +927,17 @@ for multi-horizon time series forecasting. It combines:
     tft_errors = tft_pred_var - tft_actual_var
     axes[1, 0].plot(tft_errors.index, tft_errors, color='purple', linewidth=1, alpha=0.7)
     axes[1, 0].axhline(y=0, color='black', linestyle='--', linewidth=1)
-    axes[1, 0].set_title('Prediction Errors', fontweight='bold')
-    axes[1, 0].set_xlabel('Sample Index')
+    axes[1, 0].set_title('TFT: Prediction Errors', fontsize=12, fontweight='bold')
+    axes[1, 0].set_xlabel('Date')
     axes[1, 0].set_ylabel('Error (Predicted - Actual)')
     axes[1, 0].grid(True, alpha=0.3)
     
     # Plot 4: Scatter plot (Actual vs Predicted)
-    axes[1, 1].scatter(tft_actual_var, tft_pred_var, alpha=0.5, s=20, color='steelblue')
-    min_val = min(tft_actual_var.min(), tft_pred_var.min())
-    max_val = max(tft_actual_var.max(), tft_pred_var.max())
-    axes[1, 1].plot([min_val, max_val], [min_val, max_val], 
+    axes[1, 1].scatter(tft_actual_var, tft_pred_var, alpha=0.5, s=20)
+    axes[1, 1].plot([tft_actual_var.min(), tft_actual_var.max()], 
+                    [tft_actual_var.min(), tft_actual_var.max()], 
                     'r--', linewidth=2, label='Perfect Prediction')
-    axes[1, 1].set_title(f'Actual vs Predicted Scatter (RMSE: {tft_rmse:.4f})', fontweight='bold')
+    axes[1, 1].set_title('TFT: Actual vs Predicted Scatter', fontsize=12, fontweight='bold')
     axes[1, 1].set_xlabel('Actual Variance')
     axes[1, 1].set_ylabel('Predicted Variance')
     axes[1, 1].legend()
@@ -1300,85 +945,10 @@ for multi-horizon time series forecasting. It combines:
     
     plt.tight_layout()
     report.save_and_add_plot(fig, "tft_predictions_analysis", 
-                            caption="Figure: TFT Main Performance Analysis (Validation Set)")
+                            caption="Figure: TFT Model Predictions Analysis (Validation Set)")
     plt.close()
     
-    # TFT QLIKE Distribution Analysis
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle('TFT Model: QLIKE Distribution Analysis', fontsize=14, fontweight='bold')
-    
-    axes[0].hist(tft_qlike, bins=50, color='steelblue', alpha=0.7, edgecolor='black')
-    axes[0].axvline(tft_qlike.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {tft_qlike.mean():.4f}')
-    axes[0].axvline(tft_qlike.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {tft_qlike.median():.4f}')
-    axes[0].set_title('QLIKE Distribution (Histogram)', fontweight='bold')
-    axes[0].set_xlabel('QLIKE Value')
-    axes[0].set_ylabel('Frequency')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3, axis='y')
-    
-    axes[1].boxplot(tft_qlike, vert=True, patch_artist=True)
-    axes[1].set_title('QLIKE Distribution (Box Plot)', fontweight='bold')
-    axes[1].set_ylabel('QLIKE Value')
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, "tft_qlike_distribution", 
-                            caption="Figure: TFT QLIKE Distribution Analysis")
-    plt.close()
-    
-    # TFT MSPE Distribution Analysis
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle('TFT Model: MSPE Distribution Analysis', fontsize=14, fontweight='bold')
-    
-    axes[0].hist(tft_mspe_clean, bins=50, color='coral', alpha=0.7, edgecolor='black')
-    axes[0].axvline(tft_mspe_clean.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {tft_mspe_clean.mean():.4f}')
-    axes[0].axvline(tft_mspe_clean.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {tft_mspe_clean.median():.4f}')
-    axes[0].set_title('MSPE Distribution (Histogram)', fontweight='bold')
-    axes[0].set_xlabel('MSPE Value')
-    axes[0].set_ylabel('Frequency')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3, axis='y')
-    
-    axes[1].boxplot(tft_mspe_clean, vert=True, patch_artist=True)
-    axes[1].set_title('MSPE Distribution (Box Plot)', fontweight='bold')
-    axes[1].set_ylabel('MSPE Value')
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, "tft_mspe_distribution", 
-                            caption="Figure: TFT MSPE Distribution Analysis")
-    plt.close()
-    
-    # TFT RMSE Analysis
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle('TFT Model: RMSE Analysis', fontsize=14, fontweight='bold')
-    
-    # RMSE over time (rolling window)
-    rmse_rolling = pd.Series(tft_errors ** 2, index=tft_errors.index).rolling(window=20).mean().apply(np.sqrt)
-    axes[0].plot(rmse_rolling.index, rmse_rolling, color='darkblue', linewidth=1.5, label='Rolling RMSE (20-sample window)')
-    axes[0].axhline(tft_rmse, color='red', linestyle='--', linewidth=2, label=f'Overall RMSE: {tft_rmse:.4f}')
-    axes[0].set_title('RMSE Over Time', fontweight='bold')
-    axes[0].set_xlabel('Sample Index')
-    axes[0].set_ylabel('RMSE')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
-    # Residuals histogram
-    axes[1].hist(tft_errors, bins=50, color='mediumpurple', alpha=0.7, edgecolor='black')
-    axes[1].axvline(tft_errors.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {tft_errors.mean():.4f}')
-    axes[1].axvline(0, color='black', linestyle='-', linewidth=1)
-    axes[1].set_title('Prediction Error Distribution', fontweight='bold')
-    axes[1].set_xlabel('Error Value')
-    axes[1].set_ylabel('Frequency')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3, axis='y')
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, "tft_rmse_analysis", 
-                            caption="Figure: TFT RMSE Analysis")
-    plt.close()
-    
-    print("\n✓ TFT comprehensive results and visualizations added to report")
+    print("\n✓ TFT results and visualizations added to report")
 
 
 # %% [markdown]
@@ -1577,54 +1147,26 @@ data = load_data()
 # Create report generator
 report = VolatilityReportGenerator(report_name="volatility_forecast_report", append=True)
 
-# Update TOC if appending to existing report with ML models
-if report.is_appending:
-    report.update_toc_for_ml_models()
-    print("✓ Table of Contents updated with ML models section")
-
 # %%
 
 print("\n" + "="*80)
 print("STARTING ML/TFT ANALYSIS")
 print("="*80)
 
-# Run complete analysis with ROLLING WINDOW approach
-print("\n" + "="*80)
-print("PHASE 1: TRAINING ML MODELS WITH ROLLING WINDOWS")
-print("="*80)
-
-# Combine train and test data (use ALL data for rolling window)
-full_x = pd.concat([data['train_x'], data['test_x']], axis=0)
-full_y = pd.concat([data['train_y'], data['test_y']], axis=0)
-full_exo = pd.concat([data['train_exo'], data['test_exo']], axis=0)
-
-print(f"\nFull dataset size:")
-print(f"  X: {full_x.shape}")
-print(f"  y: {full_y.shape}")
-print(f"  exo: {full_exo.shape}")
-
-# Define windows (matching stat model)
-rolling_windows = [252, 504, 756]
-
-# Train with rolling windows
-ml_results_by_window, ml_training_times, estimators, ml_model_types, windows = train_ml_models_rolling_window(
-    full_x=full_x,
-    full_y=full_y,
-    full_exo=full_exo,
-    report=report,
-    windows=rolling_windows
+# Run complete analysis (inlined from run_ml_tft_analysis)
+# Train ML models
+ml_results, ml_training_times, estimators, ml_model_types, feature_matrices = train_ml_models(
+    data['train_x'], data['train_y'], data['train_exo'], report
 )
 
 # %%
 
-# Create ML ensembles for each window
-print("\n" + "="*80)
-print("PHASE 2: CREATING ML ENSEMBLE PREDICTIONS")
-print("="*80)
-
-ml_ensemble_results = create_ml_ensembles_rolling(
-    ml_results_by_window=ml_results_by_window,
-    windows=rolling_windows,
+# Create ML ensembles
+ml_ensemble_results = create_ml_ensembles(
+    ml_models=ml_results,
+    features=feature_matrices,
+    target=data['train_y'],
+    report=report,
     ml_model_types=ml_model_types,
     vol_estimators=estimators
 )
@@ -1632,134 +1174,15 @@ ml_ensemble_results = create_ml_ensembles_rolling(
 # %%
 
 # Add ML results to report
-print("\n" + "="*80)
-print("PHASE 3: ADDING ML RESULTS TO REPORT")
-print("="*80)
-
-# Print summary for each window
-for w in rolling_windows:
-    print(f"\nWindow {w} days:")
-    for model_name in ml_model_types:
-        res = ml_ensemble_results[w][model_name]
-        print(f"  {model_name.upper():12s}: QLIKE={res['qlike_mean']:.4f}, MSPE={res['mspe_mean']:.4f}, Predictions={len(res['y_pred_var'])}")
-
-print("\n✓ ML models analysis complete with rolling windows!")
-
-# %%
-
-# Create comprehensive plots for each window
-print("\n" + "="*80)
-print("PHASE 4: GENERATING PLOTS FOR ROLLING WINDOW RESULTS")
-print("="*80)
-
-for w_idx, w in enumerate(rolling_windows, 1):
-    print(f"\n[{w_idx}/{len(rolling_windows)}] Creating plots for window {w} days...")
-    
-    report.add_section(f"ML Models Results - Window {w} Days", level=2)
-    report.add_text(f"""
-### Rolling Window: {w} Days
-
-Results for ML models trained with a {w}-day rolling window, matching the 
-statistical model methodology. Each model is trained on the most recent {w} days
-and predicts the next day's volatility.
-
-**Number of predictions:** {len(ml_ensemble_results[w][ml_model_types[0]]['y_pred_var'])} samples
-""")
-    
-    for model_name in ml_model_types:
-        print(f"  Plotting {model_name.upper()} (w={w})...")
-        
-        res = ml_ensemble_results[w][model_name]
-        y_true_var = res['y_true_var']
-        y_pred_var = res['y_pred_var']
-        y_pred_log = res['y_pred_log']
-        y_true_log = np.log(y_true_var)
-        
-        # 1. Main performance plot (4 panels)
-        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-        fig.suptitle(f'{model_name.upper()} - Window {w} Days - Performance Analysis', fontsize=16, fontweight='bold')
-        
-        # Panel 1: Predictions vs Actual (Variance scale)
-        axes[0, 0].plot(y_true_var.index, y_true_var.values, label='Actual Variance', color='black', linewidth=1, alpha=0.7)
-        axes[0, 0].plot(y_pred_var.index, y_pred_var.values, label='Predicted Variance', color='blue', linewidth=1, alpha=0.7)
-        axes[0, 0].set_title('Actual vs Predicted Variance', fontweight='bold')
-        axes[0, 0].set_xlabel('Time Index')
-        axes[0, 0].set_ylabel('Variance')
-        axes[0, 0].legend()
-        axes[0, 0].grid(True, alpha=0.3)
-        
-        # Panel 2: Predictions vs Actual (Log scale)
-        axes[0, 1].plot(y_true_log.index, y_true_log.values, label='Actual Log Variance', color='black', linewidth=1, alpha=0.7)
-        axes[0, 1].plot(y_pred_log.index, y_pred_log.values, label='Predicted Log Variance', color='red', linewidth=1, alpha=0.7)
-        axes[0, 1].set_title('Actual vs Predicted (Log Scale)', fontweight='bold')
-        axes[0, 1].set_xlabel('Time Index')
-        axes[0, 1].set_ylabel('Log Variance')
-        axes[0, 1].legend()
-        axes[0, 1].grid(True, alpha=0.3)
-        
-        # Panel 3: QLIKE over time
-        axes[1, 0].plot(res['qlike'].index, res['qlike'].values, color='orange', linewidth=1)
-        axes[1, 0].axhline(res['qlike_mean'], color='red', linestyle='--', linewidth=2, label=f"Mean: {res['qlike_mean']:.4f}")
-        axes[1, 0].set_title('QLIKE Loss Over Time', fontweight='bold')
-        axes[1, 0].set_xlabel('Time Index')
-        axes[1, 0].set_ylabel('QLIKE')
-        axes[1, 0].legend()
-        axes[1, 0].grid(True, alpha=0.3)
-        
-        # Panel 4: MSPE over time
-        axes[1, 1].plot(res['mspe'].index, res['mspe'].values, color='purple', linewidth=1)
-        axes[1, 1].axhline(res['mspe_mean'], color='red', linestyle='--', linewidth=2, label=f"Mean: {res['mspe_mean']:.4f}")
-        axes[1, 1].set_title('MSPE Loss Over Time', fontweight='bold')
-        axes[1, 1].set_xlabel('Time Index')
-        axes[1, 1].set_ylabel('MSPE')
-        axes[1, 1].legend()
-        axes[1, 1].grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        report.save_and_add_plot(fig, f"{model_name}_w{w}_performance", 
-                                caption=f"Figure: {model_name.upper()} Performance (Window={w} days)")
-        plt.close()
-        
-        # 2. Scatter plot
-        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-        ax.scatter(y_true_var.values, y_pred_var.values, alpha=0.5, s=20, color='steelblue')
-        min_val = min(y_true_var.min(), y_pred_var.min())
-        max_val = max(y_true_var.max(), y_pred_var.max())
-        ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
-        ax.set_title(f'{model_name.upper()} - Actual vs Predicted (Window={w})', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Actual Variance', fontsize=12)
-        ax.set_ylabel('Predicted Variance', fontsize=12)
-        ax.legend(fontsize=11)
-        ax.grid(True, alpha=0.3)
-        
-        # Add metrics text
-        corr = np.corrcoef(y_true_var, y_pred_var)[0, 1]
-        ax.text(0.05, 0.95, f'Correlation: {corr:.4f}\nQLIKE: {res["qlike_mean"]:.4f}\nMSPE: {res["mspe_mean"]:.4f}',
-               transform=ax.transAxes, fontsize=11, verticalalignment='top',
-               bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        plt.tight_layout()
-        report.save_and_add_plot(fig, f"{model_name}_w{w}_scatter",
-                                caption=f"Figure: {model_name.upper()} Scatter Plot (Window={w} days)")
-        plt.close()
-        
-        # Add summary table
-        summary_stats = pd.DataFrame({
-            'Metric': ['QLIKE', 'MSPE', 'Correlation', 'N Predictions'],
-            'Value': [
-                f"{res['qlike_mean']:.4f} ± {res['qlike_std']:.4f}",
-                f"{res['mspe_mean']:.4f} ± {res['mspe_std']:.4f}",
-                f"{corr:.4f}",
-                f"{len(y_pred_var)}"
-            ]
-        })
-        report.add_table(summary_stats, caption=f"Table: {model_name.upper()} Summary (Window={w} days)")
-
-print("\n✓ All plots generated!")
+model_params = {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05}
+add_ml_results_to_report(
+    ml_ensemble_results, ml_training_times, ml_model_types,
+    model_params, report
+)
 
 # Train TFT model (inlined from train_tft_model)
 print("\n" + "="*80)
-print("PHASE 4: IMPLEMENTING TEMPORAL FUSION TRANSFORMER (TFT)")
+print("IMPLEMENTING TEMPORAL FUSION TRANSFORMER (TFT)")
 print("="*80)
 # %%
 
