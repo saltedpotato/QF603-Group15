@@ -23,6 +23,8 @@ from pathlib import Path
 from datetime import datetime
 import os
 import yfinance as yf
+from joblib import Parallel, delayed
+import multiprocessing
 
 # ML model imports
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
@@ -464,14 +466,17 @@ class ML_Volatility_Model:
         self.model = None
         
     def _get_model(self):
-        """Initialize the appropriate model based on model_type"""
+        """Initialize the appropriate model based on model_type with GPU support"""
+        # Detect GPU availability (check both hardware and environment variable)
+        gpu_available = torch.cuda.is_available() and os.environ.get('ML_USE_GPU', '1') == '1'
+        
         if self.model_type == 'rf':
             return RandomForestRegressor(
                 n_estimators=self.model_params.get('n_estimators', 100),
                 max_depth=self.model_params.get('max_depth', 10),
                 min_samples_split=self.model_params.get('min_samples_split', 5),
                 random_state=42,
-                n_jobs=-1
+                n_jobs=-1  # Use all CPU cores
             )
         elif self.model_type == 'gbm':
             return GradientBoostingRegressor(
@@ -481,47 +486,67 @@ class ML_Volatility_Model:
                 random_state=42
             )
         elif self.model_type == 'xgboost':
-            return xgb.XGBRegressor(
-                n_estimators=self.model_params.get('n_estimators', 100),
-                max_depth=self.model_params.get('max_depth', 5),
-                learning_rate=self.model_params.get('learning_rate', 0.1),
-                subsample=self.model_params.get('subsample', 0.8),
-                colsample_bytree=self.model_params.get('colsample_bytree', 0.8),
-                random_state=42,
-                n_jobs=-1
-            )
+            # XGBoost with GPU support (XGBoost 3.1+ uses 'device' parameter)
+            xgb_params = {
+                'n_estimators': self.model_params.get('n_estimators', 100),
+                'max_depth': self.model_params.get('max_depth', 5),
+                'learning_rate': self.model_params.get('learning_rate', 0.1),
+                'subsample': self.model_params.get('subsample', 0.8),
+                'colsample_bytree': self.model_params.get('colsample_bytree', 0.8),
+                'random_state': 42,
+                'n_jobs': -1,
+                'tree_method': 'hist',  # Fast histogram-based algorithm
+            }
+            # Enable GPU if available (use 'device' parameter for XGBoost 3.1+)
+            if gpu_available:
+                xgb_params['device'] = 'cuda:0'  # Use first GPU device
+                xgb_params['tree_method'] = 'hist'  # 'hist' works on both CPU and GPU
+            return xgb.XGBRegressor(**xgb_params)
+            
         elif self.model_type == 'lightgbm':
-            return lgb.LGBMRegressor(
-                n_estimators=self.model_params.get('n_estimators', 100),
-                max_depth=self.model_params.get('max_depth', 5),
-                learning_rate=self.model_params.get('learning_rate', 0.1),
-                subsample=self.model_params.get('subsample', 0.8),
-                colsample_bytree=self.model_params.get('colsample_bytree', 0.8),
-                random_state=42,
-                n_jobs=-1,
-                verbose=-1
-            )
+            # LightGBM with GPU support
+            lgb_params = {
+                'n_estimators': self.model_params.get('n_estimators', 100),
+                'max_depth': self.model_params.get('max_depth', 5),
+                'learning_rate': self.model_params.get('learning_rate', 0.1),
+                'subsample': self.model_params.get('subsample', 0.8),
+                'colsample_bytree': self.model_params.get('colsample_bytree', 0.8),
+                'random_state': 42,
+                'n_jobs': -1,
+                'verbose': -1,
+            }
+            # Enable GPU if available
+            if gpu_available:
+                lgb_params['device'] = 'gpu'
+                lgb_params['gpu_platform_id'] = 0
+                lgb_params['gpu_device_id'] = 0
+            return lgb.LGBMRegressor(**lgb_params)
+            
         elif self.model_type == 'catboost':
-            return cb.CatBoostRegressor(
-                iterations=self.model_params.get('n_estimators', 100),
-                depth=self.model_params.get('max_depth', 5),
-                learning_rate=self.model_params.get('learning_rate', 0.1),
-                random_state=42,
-                verbose=False
-            )
+            # CatBoost with GPU support
+            cb_params = {
+                'iterations': self.model_params.get('n_estimators', 100),
+                'depth': self.model_params.get('max_depth', 5),
+                'learning_rate': self.model_params.get('learning_rate', 0.1),
+                'random_state': 42,
+                'verbose': False,
+                'thread_count': -1,  # Use all CPU cores
+            }
+            # Enable GPU if available
+            if gpu_available:
+                cb_params['task_type'] = 'GPU'
+                cb_params['devices'] = '0'
+            return cb.CatBoostRegressor(**cb_params)
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
     
-    def fit_predict_rolling(self, X_data, y_data, window):
+    def fit_predict_rolling(self, X_data, y_data, window, train_every_k=20):
         """
-        Perform rolling window prediction - IDENTICAL to stat_model_r7.py HAR_Model.fit_predict().
+        Perform rolling window prediction - train every K days instead of every day.
         
-        This matches the statistical model approach:
-        1. Start at position 'window' 
-        2. For each time point t from [window, len(data)):
-           - Train on data from [t-window:t]
-           - Predict the value at time t
-        3. This creates predictions for ALL data from window onwards
+        This creates a massive speedup by training fewer models while still capturing
+        rolling window dynamics. Instead of training a model for every single time step,
+        we train every K days and use that model to predict the next K days.
         
         Parameters:
         -----------
@@ -531,6 +556,8 @@ class ML_Volatility_Model:
             FULL target variable (log variance) - we use all data with rolling window
         window : int
             Rolling window size (e.g., 252, 504, 756)
+        train_every_k : int
+            Train a new model every K days (default=5 for 5x speedup)
             
         Returns:
         --------
@@ -543,8 +570,8 @@ class ML_Volatility_Model:
         yhat_full = pd.Series(index=y_data.index, data=np.nan)
         residual_raw = pd.Series(index=y_data.index, data=np.nan)
         
-        # Rolling window loop - IDENTICAL to HAR_Model.fit_predict()
-        for t in range(window, len(y_data)):
+        # Rolling window loop - train every K days instead of every day
+        for t in range(window, len(y_data), train_every_k):
             # Extract training window [t-window:t]
             y_slice = y_data.iloc[t-window:t]
             x_slice = X_data.iloc[t-window:t]
@@ -558,12 +585,14 @@ class ML_Volatility_Model:
             self.model = self._get_model()
             self.model.fit(x_slice, y_slice)
             
-            # Predict at time t (next point after training window)
-            x_next = X_data.iloc[t:t+1]
-            yhat_full.iloc[t] = self.model.predict(x_next)[0]
-            
-            # Calculate residual
-            residual_raw.iloc[t] = yhat_full.iloc[t] - y_data.iloc[t]
+            # Predict for the NEXT K days (or until end of data)
+            predict_end = min(t + train_every_k, len(y_data))
+            for pred_t in range(t, predict_end):
+                x_next = X_data.iloc[pred_t:pred_t+1]
+                yhat_full.iloc[pred_t] = self.model.predict(x_next)[0]
+                
+                # Calculate residual
+                residual_raw.iloc[pred_t] = yhat_full.iloc[pred_t] - y_data.iloc[pred_t]
         
         return yhat_full, residual_raw
 
@@ -572,210 +601,279 @@ class ML_Volatility_Model:
 # ## Train ML Models
 
 # %%
-def train_ml_models_rolling_window(full_x, full_y, full_exo, report, windows=[252, 504, 756]):
+def _train_single_model(model_name, model_params, X_combined, y_combined, window, use_gpu=True):
     """
-    Train ML models using ROLLING WINDOW approach - IDENTICAL to stat_model_r7.py.
+    Helper function to train a single model - designed for parallel execution.
     
-    This matches the statistical model exactly:
-    1. Use ALL available data (no train/test split)
-    2. For each window size (252, 504, 756 days):
-       - Start predictions at index 'window'
-       - For each time point t >= window:
-         * Train on [t-window:t]
-         * Predict at time t
-    3. This creates predictions for the ENTIRE dataset (from window onwards)
+    Parameters:
+    -----------
+    model_name : str
+        Model type ('rf', 'gbm', 'xgboost', 'lightgbm', 'catboost')
+    model_params : dict
+        Model hyperparameters
+    X_combined : pd.DataFrame
+        Combined feature matrix
+    y_combined : pd.Series
+        Target variable
+    window : int
+        Rolling window size
+    use_gpu : bool
+        Whether to attempt GPU usage (can be disabled for parallel CPU training)
+        
+    Returns:
+    --------
+    tuple : (model_name, window, results_dict, training_time, n_predictions)
+    """
+    model_start_time = time.time()
+    
+    try:
+        # Train ONE model with ALL features
+        ml_model = ML_Volatility_Model(
+            model_type=model_name,
+            model_params=model_params
+        )
+        
+        y_pred, residual_raw = ml_model.fit_predict_rolling(
+            X_combined, 
+            y_combined, 
+            window=window
+        )
+        
+        # Store results
+        results = {
+            'predictions': y_pred.dropna(),      # Predictions (log scale)
+            'residuals': residual_raw.dropna(),  # Residuals
+            'y_true': y_combined                 # Full target
+        }
+        
+        model_time = time.time() - model_start_time
+        n_predictions = y_pred.notna().sum()
+        
+        return model_name, window, results, model_time, n_predictions
+        
+    except Exception as e:
+        # If GPU training fails in parallel, this provides better error context
+        print(f"\n⚠ Error training {model_name} (window={window}): {str(e)}")
+        raise
+
+def train_ml_models_rolling_window(full_x, full_y, full_exo, report, windows=[252, 504, 756], n_jobs=-1, use_gpu=True):
+    """
+    Train ML models using ROLLING WINDOW approach with ALL features.
+    Uses parallel processing to train multiple models simultaneously.
+    
+    Key difference from stat models:
+    - ONE model per algorithm per window size
+    - Each model uses ALL volatility estimators + ALL exogenous variables as features
+    - Uses HAR lags (1, 5, 22) for each estimator
+    - PARALLEL TRAINING: Multiple models trained simultaneously for speed
     
     Parameters:
     -----------
     full_x : pd.DataFrame
         FULL volatility estimators (all data, not split)
     full_y : pd.Series
-        FULL target variable (log variance)
+        FULL target variable (log variance - square_est_log)
     full_exo : pd.DataFrame
         FULL exogenous variables
     report : VolatilityReportGenerator
         Report generator instance
     windows : list
         List of rolling window sizes (e.g., [252, 504, 756])
+    n_jobs : int
+        Number of parallel jobs (-1 = use all cores, 1 = sequential)
+    use_gpu : bool
+        Whether to use GPU acceleration (if available). 
+        Note: Set to False if experiencing GPU conflicts in parallel mode
         
     Returns:
     --------
     ml_results : dict
-        Dictionary structure: ml_results[window][model_name][estimator] = {predictions, residuals, y_true}
+        Dictionary: ml_results[window][model_name] = {predictions, residuals, y_true}
     ml_training_times : dict
         Training times for each window-model combination
     """
+    # Detect GPU and CPU configuration
+    gpu_available = torch.cuda.is_available() and use_gpu
+    n_cpus = multiprocessing.cpu_count()
+    actual_jobs = n_cpus if n_jobs == -1 else min(n_jobs, n_cpus)
+    
+    # Set environment variable to control GPU usage in child processes
+    if not use_gpu:
+        os.environ['ML_USE_GPU'] = '0'
+    else:
+        os.environ['ML_USE_GPU'] = '1'
+    
+    # Warn about GPU + parallel mode
+    if n_jobs != 1 and gpu_available:
+        print("\n⚠ Note: GPU + parallel training may cause conflicts with some setups.")
+        print("   If you see GPU errors, re-run with: use_gpu=False or n_jobs=1")
+        print("   Continuing with GPU enabled...\n")
+    
     print("="*80)
     print("TRAINING ML MODELS WITH ROLLING WINDOW APPROACH")
     print("="*80)
-    print("\nMatching stat_model_r7.py methodology:")
-    print("  • Using ALL available data (no train/test split)")
-    print("  • Rolling window prediction for each window size")
+    print("\nConfiguration:")
+    print("  • ONE model per algorithm per window size")
+    print("  • Each model uses ALL estimators + exogenous variables")
+    print("  • HAR lags (1, 5, 22) computed for each estimator")
     print(f"  • Window sizes: {windows}")
+    print(f"  • Parallel jobs: {actual_jobs} (out of {n_cpus} CPU cores)")
+    print(f"  • GPU acceleration: {'✓ ENABLED' if gpu_available else '✗ Not available'}")
+    if gpu_available:
+        print(f"    - XGBoost: device='cuda:0' with hist tree_method")
+        print(f"    - LightGBM: device='gpu'")
+        print(f"    - CatBoost: task_type='GPU'")
     print("="*80)
     
     # Configuration
     estimators = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']
     exo_cols = ['UST10Y', 'HYOAS', 'TermSpread_10Y_2Y', 'VIX', 'Breakeven10Y']
-    ml_model_types = ['rf', 'gbm']  # Focus on RF and GBM only
+    ml_model_types = ['rf', 'gbm', 'xgboost', 'lightgbm', 'catboost']
     model_params = {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05}
     
-    # Pre-compute features ONCE for all estimators
+    # Build combined feature matrix with ALL estimators and their lags
     print("\n" + "="*60)
-    print("PRE-COMPUTING HAR FEATURES FOR ALL ESTIMATORS")
+    print("BUILDING COMBINED FEATURE MATRIX")
+    print("="*60)
+    print("Including:")
+    print(f"  • {len(estimators)} volatility estimators with HAR lags (1, 5, 22)")
+    print(f"  • {len(exo_cols)} exogenous variables")
+    
+    # Compute HAR features for ALL estimators
+    all_features = []
+    for est in estimators:
+        print(f"  Computing HAR lags for {est}...", end=" ")
+        df_in = full_x[[est]].copy()
+        har = HAR_Model(y_log_col=est, exo_col=[], lags=[1, 5, 22])
+        x_est = har.features(df_in)
+        # Rename columns to include estimator name
+        x_est.columns = [f"{est}_{col}" for col in x_est.columns]
+        all_features.append(x_est)
+        print(f"✓ {x_est.shape[1]} features")
+    
+    # Add exogenous variables
+    print(f"  Adding exogenous variables...", end=" ")
+    all_features.append(full_exo[exo_cols])
+    print(f"✓ {len(exo_cols)} features")
+    
+    # Combine all features
+    X_combined = pd.concat(all_features, axis=1)
+    X_combined = X_combined.dropna()
+    y_combined = full_y.loc[X_combined.index]
+    
+    print(f"\n✓ Combined feature matrix: {X_combined.shape}")
+    print(f"  Total features: {X_combined.shape[1]}")
+    print(f"  Total samples: {X_combined.shape[0]}")
+    print(f"  Feature breakdown:")
+    print(f"    - HAR features: {X_combined.shape[1] - len(exo_cols)} (from {len(estimators)} estimators)")
+    print(f"    - Exogenous: {len(exo_cols)}")
     print("="*60)
     
-    feature_matrices = {}
-    for est in estimators:
-        print(f"  Computing features for {est}...", end=" ")
-        df_in = pd.concat([full_x[[est]], full_exo[exo_cols]], axis=1)
-        har = HAR_Model(y_log_col=est, exo_col=exo_cols, lags=[1,5,22])
-        x_est = har.features(df_in)
-        y_adj = full_y.loc[x_est.index]
-        feature_matrices[est] = {'X': x_est, 'y': y_adj}
-        print(f"✓ {x_est.shape}")
-    
-    print(f"✓ All features pre-computed\n")
-    
-    # Results storage - nested dict: [window][model_name][estimator]
+    # Results storage - nested dict: [window][model_name]
     ml_results = {w: {} for w in windows}
     ml_training_times = {}
     
-    # OUTER LOOP: Rolling Window Sizes (matching stat model structure)
-    for w_idx, w in enumerate(windows, 1):
-        print(f"\n{'='*80}")
-        print(f"WINDOW SIZE: {w} days [{w_idx}/{len(windows)}]")
-        print(f"{'='*80}")
-        
-        for model_name in ml_model_types:
-            print(f"\n  Training {model_name.upper()} (window={w})...")
-            model_start_time = time.time()
-            ml_results[w][model_name] = {}
-            
-            for est_idx, est in enumerate(estimators, 1):
-                print(f"    [{est_idx}/{len(estimators)}] {est:20s}", end=" ... ")
-                est_start = time.time()
-                
-                # Get pre-computed features
-                x_data = feature_matrices[est]['X']
-                y_data = feature_matrices[est]['y']
-                
-                # ROLLING WINDOW PREDICTION (matching HAR_Model.fit_predict)
-                ml_model = ML_Volatility_Model(
-                    model_type=model_name,
-                    model_params=model_params
-                )
-                
-                y_pred, residual_raw = ml_model.fit_predict_rolling(x_data, y_data, window=w)
-                
-                # Store results
-                ml_results[w][model_name][est] = {
-                    'predictions': y_pred.dropna(),      # Predictions from window onwards
-                    'residuals': residual_raw.dropna(),  # Residuals
-                    'y_true': y_data                     # Full target for alignment
-                }
-                
-                est_time = time.time() - est_start
-                n_predictions = y_pred.notna().sum()
-                print(f"({est_time:.2f}s) Predictions: {n_predictions}")
-            
-            model_time = time.time() - model_start_time
-            ml_training_times[f"{model_name}_w{w}"] = model_time
-            print(f"    ✓ {model_name.upper():12s} (w={w}): {model_time:.2f}s")
+    # Create list of all (model, window) combinations for parallel processing
+    training_jobs = [(model_name, w) for w in windows for model_name in ml_model_types]
+    total_jobs = len(training_jobs)
+    
+    print(f"\n{'='*80}")
+    print(f"TRAINING {total_jobs} MODELS IN PARALLEL")
+    print(f"{'='*80}")
+    print(f"Combinations: {len(windows)} windows × {len(ml_model_types)} algorithms")
+    print(f"Jobs per batch: {min(actual_jobs, total_jobs)}")
+    print(f"{'='*80}\n")
+    
+    overall_start = time.time()
+    
+    # Train models in parallel using joblib
+    # Note: n_jobs=1 for sequential (easier debugging), n_jobs=-1 for full parallelization
+    if n_jobs == 1:
+        # Sequential training (for debugging or GPU conflicts)
+        print("Running SEQUENTIAL training (n_jobs=1)...\n")
+        results_list = []
+        for job_idx, (model_name, w) in enumerate(training_jobs, 1):
+            print(f"[{job_idx}/{total_jobs}] Training {model_name.upper()} (window={w})...", end=" ")
+            result = _train_single_model(model_name, model_params, X_combined, y_combined, w)
+            results_list.append(result)
+            print(f"✓ ({result[3]:.2f}s) Predictions: {result[4]}")
+    else:
+        # Parallel training
+        print(f"Running PARALLEL training ({actual_jobs} jobs)...\n")
+        results_list = Parallel(n_jobs=actual_jobs, verbose=10)(
+            delayed(_train_single_model)(model_name, model_params, X_combined, y_combined, w)
+            for model_name, w in training_jobs
+        )
+    
+    # Organize results
+    for model_name, w, results, model_time, n_predictions in results_list:
+        ml_results[w][model_name] = results
+        ml_training_times[f"{model_name}_w{w}"] = model_time
+    
+    overall_time = time.time() - overall_start
     
     print("\n" + "="*80)
     print("✓ ALL ML MODELS TRAINED WITH ROLLING WINDOWS")
     print("="*80)
+    print(f"\nTotal models trained: {len(windows)} windows × {len(ml_model_types)} algorithms = {total_jobs} models")
+    print(f"Parallel execution: {actual_jobs} jobs")
+    print(f"GPU acceleration: {'✓ ENABLED' if gpu_available else '✗ Not available'}")
     print("\nTraining Time Summary:")
     for key, elapsed in sorted(ml_training_times.items(), key=lambda x: x[1]):
         print(f"  {key:20s}: {elapsed:7.2f}s")
-    total_time = sum(ml_training_times.values())
-    print(f"  {'TOTAL':20s}: {total_time:7.2f}s")
+    cumulative_time = sum(ml_training_times.values())
+    print(f"\n  {'CUMULATIVE':20s}: {cumulative_time:7.2f}s (sum of all models)")
+    print(f"  {'WALL-CLOCK':20s}: {overall_time:7.2f}s (actual time elapsed)")
+    if overall_time > 0:
+        speedup = cumulative_time / overall_time
+        print(f"  {'SPEEDUP':20s}: {speedup:.2f}x")
+    print(f"  {'AVERAGE':20s}: {cumulative_time/len(ml_training_times):.2f}s per model")
     print("="*80)
     
-    return ml_results, ml_training_times, estimators, ml_model_types, windows
+    return ml_results, ml_training_times, ml_model_types, windows
 
 
 # %%
-def create_ml_ensembles_rolling(ml_results_by_window, windows, ml_model_types, vol_estimators):
+def evaluate_ml_models(ml_results_by_window, windows, ml_model_types):
     """
-    Create ensemble predictions for ML models using ROLLING WINDOW results.
-    IDENTICAL logic to stat_model_r7.py ensemble creation.
+    Evaluate ML model performance across different window sizes.
     
-    For each window size and each model:
-    1. Collect predictions from all 4 estimators
-    2. Convert to variance scale
-    3. Compute QLIKE for each estimator
-    4. Create ensemble using inverse QLIKE weighting
+    Since each model now uses ALL features (not per-estimator), we directly
+    evaluate the predictions against the target.
     
     Parameters:
     -----------
     ml_results_by_window : dict
-        Nested dict: ml_results[window][model_name][estimator] = {predictions, residuals, y_true}
+        Nested dict: ml_results[window][model_name] = {predictions, residuals, y_true}
     windows : list
         List of window sizes
     ml_model_types : list
         List of model names
-    vol_estimators : list
-        List of volatility estimators
         
     Returns:
     --------
-    ml_ensemble_results : dict
-        Nested dict: ml_ensemble_results[window][model_name] = {ensemble metrics and predictions}
+    ml_evaluation_results : dict
+        Nested dict: ml_evaluation_results[window][model_name] = {metrics and predictions}
     """
     print("\n" + "="*80)
-    print("CREATING ML ENSEMBLE PREDICTIONS (Rolling Window)")
+    print("EVALUATING ML MODEL PERFORMANCE")
     print("="*80)
     
-    ml_ensemble_results = {w: {} for w in windows}
+    ml_evaluation_results = {w: {} for w in windows}
     
     for w_idx, w in enumerate(windows, 1):
-        print(f"\n[Window {w_idx}/{len(windows)}] Processing window size: {w} days")
+        print(f"\n[Window {w_idx}/{len(windows)}] Window size: {w} days")
         
         for model_idx, model_name in enumerate(ml_model_types, 1):
             print(f"  [{model_idx}/{len(ml_model_types)}] {model_name.upper()}...", end=' ')
             
-            # Extract predictions from all estimators (LOG scale)
-            model_predictions_log = {}
-            aligned_target_log = {}
+            # Extract predictions (LOG scale)
+            y_pred_log = ml_results_by_window[w][model_name]['predictions']
+            y_true_log = ml_results_by_window[w][model_name]['y_true'].loc[y_pred_log.index]
             
-            for est in vol_estimators:
-                pred = ml_results_by_window[w][model_name][est]['predictions']
-                y_true_full = ml_results_by_window[w][model_name][est]['y_true']
-                
-                # Align y_true with predictions
-                aligned_target_log[est] = y_true_full.loc[pred.index]
-                model_predictions_log[est] = pred
-            
-            model_predictions_log = pd.DataFrame(model_predictions_log)
-            aligned_target_log = pd.DataFrame(aligned_target_log)
-            
-            # Convert to VARIANCE scale (matching stat model)
-            model_predictions_var = np.exp(model_predictions_log)
-            aligned_target_var = np.exp(aligned_target_log)
-            
-            # Compute QLIKE for each estimator
-            qlike_losses_ts = pd.DataFrame({
-                est: qlike(aligned_target_var[est], model_predictions_var[est]) 
-                for est in vol_estimators
-            })
-            
-            # Mean QLIKE for each estimator
-            qlike_means = qlike_losses_ts.mean()
-            
-            # Compute inverse QLIKE weights
-            qlike_shifted = qlike_means - qlike_means.min() + 1e-6
-            inverse_qlike = 1.0 / qlike_shifted
-            weights = inverse_qlike / inverse_qlike.sum()
-            
-            # Weight predictions in VARIANCE space
-            y_pred_var = model_predictions_var.dot(weights)
-            y_pred_var = pd.Series(y_pred_var, index=model_predictions_log.index)
-            
-            # Use best estimator's true values for evaluation
-            best_estimator_name = qlike_means.idxmin()
-            y_true_var = aligned_target_var[best_estimator_name]
+            # Convert to VARIANCE scale
+            y_pred_var = np.exp(y_pred_log)
+            y_true_var = np.exp(y_true_log)
             
             # Calculate performance metrics
             qlike_scores = pd.Series(qlike(y_true_var, y_pred_var), index=y_pred_var.index)
@@ -785,161 +883,32 @@ def create_ml_ensembles_rolling(ml_results_by_window, windows, ml_model_types, v
             valid_mask = y_true_var > 1e-6
             mspe_scores = mspe_scores_raw[valid_mask]
             
+            # Calculate RMSE
+            rmse_score = rmse(y_true_var, y_pred_var)
+            
             # Store results
-            ml_ensemble_results[w][model_name] = {
+            ml_evaluation_results[w][model_name] = {
                 'y_true_var': y_true_var,
                 'y_pred_var': y_pred_var,
-                'y_pred_log': np.log(y_pred_var),
+                'y_true_log': y_true_log,
+                'y_pred_log': y_pred_log,
                 'qlike': qlike_scores,
                 'mspe': mspe_scores,
-                'weights': weights,
-                'best_estimator': best_estimator_name,
+                'rmse': rmse_score,
                 'qlike_mean': qlike_scores.mean(),
                 'qlike_std': qlike_scores.std(),
                 'mspe_mean': mspe_scores.mean(),
                 'mspe_std': mspe_scores.std()
             }
             
-            print(f"✓ QLIKE: {qlike_scores.mean():.4f}, MSPE: {mspe_scores.mean():.4f}")
+            print(f"✓ QLIKE: {qlike_scores.mean():.4f}, MSPE: {mspe_scores.mean():.4f}, RMSE: {rmse_score:.4f}")
     
-    print("\n✓ ML ensemble predictions created for all windows")
-    return ml_ensemble_results
+    print("\n✓ ML model evaluation completed for all windows")
+    return ml_evaluation_results
 
 
 # %%
-def add_ml_results_to_report(ml_ensemble_results, ml_training_times, ml_model_types, model_params, report):
-    """
-    Add ML results to report with training times and performance metrics.
-    
-    Parameters:
-    -----------
-    ml_ensemble_results : dict
-        Ensemble results
-    ml_training_times : dict
-        Training times
-    ml_model_types : list
-        List of model types
-    model_params : dict
-        Model hyperparameters
-    report : VolatilityReportGenerator
-        Report generator instance
-    """
-    # Create performance comparison table
-    ml_performance_summary = pd.DataFrame({
-        'Model': ml_model_types,
-        'QLIKE_mean': [ml_ensemble_results[m]['qlike_mean'] for m in ml_model_types],
-        'QLIKE_std': [ml_ensemble_results[m]['qlike_std'] for m in ml_model_types],
-        'MSPE_mean': [ml_ensemble_results[m]['mspe_mean'] for m in ml_model_types],
-        'MSPE_std': [ml_ensemble_results[m]['mspe_std'] for m in ml_model_types]
-    }).set_index('Model')
-    
-    print("\n" + "="*80)
-    print("ML MODELS PERFORMANCE SUMMARY (Training Set)")
-    print("="*80)
-    print(ml_performance_summary.round(4))
-    print("="*80)
-    
-    # Add ML Training Results to Report
-    report.add_section("Machine Learning Models Results", level=2)
-    
-    # Training Time Summary
-    report.add_section("ML Models Training Time", level=3)
-    training_time_summary = pd.DataFrame({
-        'Model': list(ml_training_times.keys()),
-        'Training Time (seconds)': list(ml_training_times.values())
-    }).set_index('Model').sort_values('Training Time (seconds)')
-    
-    report.add_text(f"""
-### Training Efficiency
-
-All machine learning models were trained on pre-computed feature matrices with optimized
-vectorized operations. Training times reflect the complete training process for all
-4 volatility estimators.
-
-**Optimization Applied:**
-- Pre-computed HAR features once (not in loop)
-- Direct model training (no rolling window bottleneck)
-- Vectorized ensemble computation
-- Total training time: {sum(ml_training_times.values()):.2f}s for all 5 models
-
-**Speed Ranking (Fastest to Slowest):**
-""")
-    report.add_table(training_time_summary, caption="Table 12a: ML Models Training Time (Optimized)")
-    
-    # Performance Summary
-    report.add_section("ML Models Performance (Training Set)", level=3)
-    report.add_text(f"""
-### Performance Metrics
-
-Machine learning models achieved competitive results using the same feature engineering
-as HAR-X with ensemble weighting based on inverse QLIKE loss.
-
-**Model Descriptions:**
-- **Random Forest (RF)**: Ensemble of {model_params.get('n_estimators', 100)} random decision trees
-- **Gradient Boosting (GBM)**: Sequential gradient boosting with {model_params.get('max_depth', 5)}-level trees
-- **XGBoost**: Optimized gradient boosting with regularization
-- **LightGBoost**: Histogram-based learning (fastest)
-- **CatBoost**: Categorical boosting with ordered architecture
-
-**Key Metrics:**
-- **QLIKE**: Forecast calibration (lower is better)
-- **MSPE**: Mean squared percentage error (lower is better)
-- All metrics computed on training set using ensemble predictions
-""")
-    report.add_table(ml_performance_summary.round(4), caption="Table 12b: ML Models Performance Summary")
-    
-    # Add ML model charts
-    for model_name in ml_model_types:
-        add_model_charts_to_report(ml_ensemble_results[model_name], model_name, report)
-    
-    # Model Rankings and Recommendations
-    report.add_section("ML Models Analysis & Recommendations", level=3)
-    
-    best_qlike_idx = ml_performance_summary['QLIKE_mean'].idxmin()
-    best_speed_idx = min(ml_training_times, key=ml_training_times.get)
-    best_mspe_idx = ml_performance_summary['MSPE_mean'].idxmin();
-    
-    report.add_text(f"""
-### Model Rankings
-
-**By QLIKE (Forecast Calibration):**
-1. **{best_qlike_idx.upper()}** - QLIKE: {ml_performance_summary.loc[best_qlike_idx, 'QLIKE_mean']:.4f} ±{ml_performance_summary.loc[best_qlike_idx, 'QLIKE_std']:.4f}
-2. Best for reliable uncertainty estimates
-
-**By Training Speed:**
-1. **{best_speed_idx.upper()}** - {ml_training_times[best_speed_idx]:.2f}s (fastest)
-2. Best for production efficiency
-
-**By MSPE (Prediction Error):**
-1. **{best_mspe_idx.upper()}** - MSPE: {ml_performance_summary.loc[best_mspe_idx, 'MSPE_mean']:.4f} ±{ml_performance_summary.loc[best_mspe_idx, 'MSPE_std']:.4f}
-2. Best for raw error minimization
-
-### Recommendations
-
-**For Production Deployment:**
-- Use **{best_speed_idx.upper()}** for fastest inference ({ml_training_times[best_speed_idx]:.2f}s)
-- QLIKE: {ml_ensemble_results[best_speed_idx]['qlike_mean']:.4f} (competitive)
-
-**For Highest Accuracy:**
-- Use **{best_qlike_idx.upper()}** for best calibration
-- Training time: {ml_training_times[best_qlike_idx]:.2f}s
-
-**For Balanced Approach:**
-- Use **XGBoost** (good speed-accuracy tradeoff)
-- Training time: {ml_training_times['xgboost']:.2f}s
-- QLIKE: {ml_ensemble_results['xgboost']['qlike_mean']:.4f}
-
-**For Ensemble Strategy:**
-- Combine top 3 models by QLIKE for robustness
-- Use inverse QLIKE weighting
-- Expected QLIKE improvement: {((ml_performance_summary['QLIKE_mean'].max() - ml_performance_summary['QLIKE_mean'].min()) / ml_performance_summary['QLIKE_mean'].min() * 100):.1f}%
-""")
-    
-    print("\n✓ ML training results and analysis added to report")
-
-
-# %%
-def add_model_charts_to_report(model_results, model_name, report):
+def add_model_charts_to_report_old_unused(model_results, model_name, report):
     """
     Generate and add charts for a single ML model to the report.
     """
@@ -1136,7 +1105,7 @@ def add_model_charts_to_report(model_results, model_name, report):
     }
     summary_df = pd.DataFrame(summary_stats).set_index('Metric')
     report.add_text(f"\n**{model_name.upper()} Summary Statistics:**\n")
-    report.add_table(summary_df.round(6), caption=f"Table: {model_name.upper()} Detailed Performance Metrics")
+    report.add_table(summary_df, caption=f"Table: {model_name.upper()} Detailed Performance Metrics")
 
 
 # %% [markdown]
@@ -1387,14 +1356,16 @@ for multi-horizon time series forecasting. It combines:
 # Compare all models (HAR, HARX, ML models, TFT)
 
 # %%
-def create_comprehensive_comparison(ml_ensemble_results, ml_model_types, tft_qlike, tft_mspe, report, plt):
+def create_comprehensive_comparison(ml_evaluation_results, windows, ml_model_types, tft_qlike, tft_mspe, report, plt):
     """
-    Create comprehensive comparison of all models.
+    Create comprehensive comparison of all models across different window sizes.
     
     Parameters:
     -----------
-    ml_ensemble_results : dict
-        ML ensemble results
+    ml_evaluation_results : dict
+        ML evaluation results per window: results[window][model]
+    windows : list
+        List of window sizes
     ml_model_types : list
         List of ML model types
     tft_qlike : pd.Series
@@ -1426,6 +1397,7 @@ def create_comprehensive_comparison(ml_ensemble_results, ml_model_types, tft_qli
     all_models_comparison.append({
         'Model': 'HAR (w=504)',
         'Type': 'Statistical',
+        'Window': 504,
         'QLIKE_mean': har_504_qlike,
         'MSPE_mean': har_504_mspe,
         'Rank': 0
@@ -1434,27 +1406,33 @@ def create_comprehensive_comparison(ml_ensemble_results, ml_model_types, tft_qli
     all_models_comparison.append({
         'Model': 'HAR-X (w=756)',
         'Type': 'Statistical',
+        'Window': 756,
         'QLIKE_mean': harx_756_qlike,
         'MSPE_mean': harx_756_mspe,
         'Rank': 0
     })
     
-    # Add ML models
-    for model_name in ml_model_types:
-        all_models_comparison.append({
-            'Model': model_name.upper(),
-            'Type': 'Machine Learning',
-            'QLIKE_mean': ml_ensemble_results[model_name]['qlike_mean'],
-            'MSPE_mean': ml_ensemble_results[model_name]['mspe_mean'],
-            'Rank': 0
-        })
+    # Add ML models for each window
+    for w in windows:
+        for model_name in ml_model_types:
+            all_models_comparison.append({
+                'Model': f"{model_name.upper()} (w={w})",
+                'Type': 'Machine Learning',
+                'Window': w,
+                'QLIKE_mean': ml_evaluation_results[w][model_name]['qlike_mean'],
+                'MSPE_mean': ml_evaluation_results[w][model_name]['mspe_mean'],
+                'RMSE': ml_evaluation_results[w][model_name]['rmse'],
+                'Rank': 0
+            })
     
     # Add TFT
     all_models_comparison.append({
         'Model': 'TFT',
         'Type': 'Deep Learning',
-        'QLIKE_mean': tft_qlike.mean(),
-        'MSPE_mean': tft_mspe.mean(),
+        'Window': 'N/A',
+        'QLIKE_mean': tft_qlike.mean() if tft_qlike is not None else np.nan,
+        'MSPE_mean': tft_mspe.mean() if tft_mspe is not None else np.nan,
+        'RMSE': np.nan,
         'Rank': 0
     })
     
@@ -1464,7 +1442,12 @@ def create_comprehensive_comparison(ml_ensemble_results, ml_model_types, tft_qli
     # Rank by QLIKE (lower is better)
     comparison_df = comparison_df.sort_values('QLIKE_mean')
     comparison_df['Rank'] = range(1, len(comparison_df) + 1)
-    comparison_df = comparison_df[['Rank', 'Model', 'Type', 'QLIKE_mean', 'MSPE_mean']]
+    
+    # Select columns to display
+    display_cols = ['Rank', 'Model', 'Type', 'Window', 'QLIKE_mean', 'MSPE_mean']
+    if 'RMSE' in comparison_df.columns:
+        display_cols.append('RMSE')
+    comparison_df_display = comparison_df[display_cols]
     
     print("\n" + "="*80)
     print("MODEL RANKING BY QLIKE (Lower is Better)")
@@ -1484,7 +1467,7 @@ All models are ranked by QLIKE (Quasi-Likelihood) metric, where lower values
 indicate better forecast calibration.
 """)
     
-    report.add_table(comparison_df.round(4), caption="Table 14: Comprehensive Model Comparison (Ranked by QLIKE)")
+    report.add_table(comparison_df, caption="Table 14: Comprehensive Model Comparison (Ranked by QLIKE)")
     
     # Create visualization
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
@@ -1604,29 +1587,48 @@ print(f"  y: {full_y.shape}")
 print(f"  exo: {full_exo.shape}")
 
 # Define windows (matching stat model)
-rolling_windows = [252, 504, 756]
+rolling_windows = [252, 756]
 
 # Train with rolling windows
-ml_results_by_window, ml_training_times, estimators, ml_model_types, windows = train_ml_models_rolling_window(
+# Configuration options:
+# - n_jobs=-1: Use all CPU cores for parallel training (FASTEST for CPU)
+# - n_jobs=1: Sequential training (use with GPU to avoid conflicts)
+# - use_gpu=True: Enable GPU acceleration (recommended with n_jobs=1)
+# - use_gpu=False: CPU-only (safe for parallel training)
+
+# RECOMMENDED: Parallel CPU training (no GPU conflicts)
+ml_results_by_window, ml_training_times, ml_model_types, windows = train_ml_models_rolling_window(
     full_x=full_x,
     full_y=full_y,
     full_exo=full_exo,
     report=report,
-    windows=rolling_windows
+    windows=rolling_windows,
+    n_jobs=-1,      # Use all CPU cores for parallel training
+    use_gpu=False   # Disable GPU to avoid parallel conflicts (faster overall)
 )
+
+# ALTERNATIVE: Sequential GPU training (if you prefer GPU)
+# ml_results_by_window, ml_training_times, ml_model_types, windows = train_ml_models_rolling_window(
+#     full_x=full_x,
+#     full_y=full_y,
+#     full_exo=full_exo,
+#     report=report,
+#     windows=rolling_windows,
+#     n_jobs=1,       # Sequential training
+#     use_gpu=True    # Enable GPU acceleration
+# )
 
 # %%
 
-# Create ML ensembles for each window
+# Evaluate ML models for each window
 print("\n" + "="*80)
-print("PHASE 2: CREATING ML ENSEMBLE PREDICTIONS")
+print("PHASE 2: EVALUATING ML MODEL PERFORMANCE")
 print("="*80)
 
-ml_ensemble_results = create_ml_ensembles_rolling(
+ml_evaluation_results = evaluate_ml_models(
     ml_results_by_window=ml_results_by_window,
     windows=rolling_windows,
-    ml_model_types=ml_model_types,
-    vol_estimators=estimators
+    ml_model_types=ml_model_types
 )
 
 # %%
@@ -1640,8 +1642,8 @@ print("="*80)
 for w in rolling_windows:
     print(f"\nWindow {w} days:")
     for model_name in ml_model_types:
-        res = ml_ensemble_results[w][model_name]
-        print(f"  {model_name.upper():12s}: QLIKE={res['qlike_mean']:.4f}, MSPE={res['mspe_mean']:.4f}, Predictions={len(res['y_pred_var'])}")
+        res = ml_evaluation_results[w][model_name]
+        print(f"  {model_name.upper():12s}: QLIKE={res['qlike_mean']:.4f}, MSPE={res['mspe_mean']:.4f}, RMSE={res['rmse']:.4f}, Predictions={len(res['y_pred_var'])}")
 
 print("\n✓ ML models analysis complete with rolling windows!")
 
@@ -1663,13 +1665,13 @@ Results for ML models trained with a {w}-day rolling window, matching the
 statistical model methodology. Each model is trained on the most recent {w} days
 and predicts the next day's volatility.
 
-**Number of predictions:** {len(ml_ensemble_results[w][ml_model_types[0]]['y_pred_var'])} samples
+**Number of predictions:** {len(ml_evaluation_results[w][ml_model_types[0]]['y_pred_var'])} samples
 """)
     
     for model_name in ml_model_types:
         print(f"  Plotting {model_name.upper()} (w={w})...")
         
-        res = ml_ensemble_results[w][model_name]
+        res = ml_evaluation_results[w][model_name]
         y_true_var = res['y_true_var']
         y_pred_var = res['y_pred_var']
         y_pred_log = res['y_pred_log']
@@ -1769,6 +1771,238 @@ estimators = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']
 # Apply preprocessing for TFT (clips outliers and scales features)
 data, scalers = preprocess_predictors_for_tft(data)
 
+# %%
+
+# Prepare data for TFT
+print("Preparing TFT dataset...")
+tft_train_data = prepare_tft_data(
+    vol_data=data['train_x'][estimators],
+    exo_data=data['train_exo'][exo_cols],
+    y_true=data['train_y'],
+    max_encoder_length=22,
+    max_prediction_length=1
+)
+# %%
+print(f"✓ TFT training data prepared: {tft_train_data.shape}")
+print(f"  Columns: {list(tft_train_data.columns)}")
+print(f"  Date range: {tft_train_data['Date'].min()} to {tft_train_data['Date'].max()}")
+# %%
+# Define validation split (last 20% of training data)
+training_cutoff = int(tft_train_data['time_idx'].max() * 0.8)
+# Time-varying features (change over time)
+time_varying_known_reals = exo_cols  # Exogenous variables
+time_varying_unknown_reals = estimators + ['target']
+
+print(f"Training cutoff: {training_cutoff}")
+print(f"Time-varying known reals: {time_varying_known_reals}")
+print(f"Time-varying unknown reals: {time_varying_unknown_reals}")
+
+# Create TimeSeriesDataSet
+training_tft = TimeSeriesDataSet(
+    tft_train_data[tft_train_data['time_idx'] <= training_cutoff],
+    time_idx='time_idx',
+    target='target',
+    group_ids=['group'],
+    min_encoder_length=30,  # Reduced to keep more training samples
+    max_encoder_length=90,  # Keep longer lookback for volatility patterns
+    min_prediction_length=1,
+    max_prediction_length=1,
+    time_varying_known_reals=time_varying_known_reals,
+    time_varying_unknown_reals=time_varying_unknown_reals,
+    target_normalizer=GroupNormalizer(groups=["group"]),  # Re-enabled for better training
+    add_relative_time_idx=True,
+    add_target_scales=True,
+    add_encoder_length=True,
+)
+
+# Create validation dataset
+validation_tft = TimeSeriesDataSet.from_dataset(
+    training_tft,
+    tft_train_data[tft_train_data['time_idx'] > training_cutoff],
+    predict=False,
+    stop_randomization=True
+)
+
+# Create dataloaders
+batch_size = 16  # Increased for more stable gradients with preprocessed features
+train_dataloader = training_tft.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
+val_dataloader = validation_tft.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
+
+print(f"✓ TFT datasets created")
+print(f"  Training samples: {len(training_tft)}")
+print(f"  Validation samples: {len(validation_tft)}")
+print(f"  Batch size: {batch_size}")
+# %%
+# Configure TFT model
+print("\n" + "="*60)
+print("TRAINING TEMPORAL FUSION TRANSFORMER")
+print("="*60)
+
+tft = TemporalFusionTransformer.from_dataset(
+    training_tft,
+    learning_rate=0.0003,  # Lower LR for stable training with scaled features
+    hidden_size=64,      # Reduced to prevent overfitting on small dataset
+    attention_head_size=4,  # Appropriate for hidden_size=64
+    dropout=0.1,         # Lower dropout with better preprocessing
+    hidden_continuous_size=32,  # Reduced for dataset size
+    output_size=7,       # Multiple quantiles (keeping as requested)
+    loss=QuantileLoss(quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]),
+    log_interval=5,
+    reduce_on_plateau_patience=4,
+)
+
+print(f"✓ TFT model configured")
+print(f"  Hidden size: 64 (optimized for dataset size)")
+print(f"  Attention heads: 4")
+print(f"  Dropout: 0.1")
+print(f"  Learning rate: 0.0003 (stable for preprocessed features)")
+print(f"  Loss quantiles: {tft.loss.quantiles}")
+print(f"  Output: Multiple quantiles (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)")
+
+# Custom PyTorch Lightning Callback for logging RMSE and Accuracy
+try:
+    from lightning.pytorch.callbacks import Callback
+except ImportError:
+    from pytorch_lightning.callbacks import Callback
+
+class TFTMetricsCallback(Callback):
+    """PyTorch Lightning callback to log RMSE and accuracy during training."""
+    
+    def __init__(self, val_dataloader, model, log_every_n_epochs=1):
+        super().__init__()
+        self.val_dataloader = val_dataloader
+        self.model = model
+        self.log_every_n_epochs = log_every_n_epochs
+        
+    def on_validation_epoch_end(self, trainer, pl_module):
+        """Called at the end of each validation epoch."""
+        if (trainer.current_epoch + 1) % self.log_every_n_epochs == 0:
+            try:
+                # Put model in eval mode
+                pl_module.eval()
+                
+                # Collect predictions and actuals manually batch by batch
+                all_predictions = []
+                all_actuals = []
+                
+                with torch.no_grad():
+                    for batch_idx, batch in enumerate(self.val_dataloader):
+                        # Get batch data - handle device placement
+                        x, y = batch
+                        
+                        # Move to same device as model if needed
+                        if hasattr(pl_module, 'device'):
+                            device = pl_module.device
+                            # Move x dict tensors to device
+                            x = {k: v.to(device) if torch.is_tensor(v) else v for k, v in x.items()}
+                        
+                        # Forward pass to get predictions
+                        output = pl_module(x)
+                        
+                        # Extract predictions (median quantile)
+                        if hasattr(output, 'prediction'):
+                            preds = output.prediction
+                        else:
+                            preds = output
+                        
+                        # Handle quantile outputs
+                        if preds.ndim == 3:  # [batch, time, quantiles]
+                            preds = preds[:, 0, 3]  # Get first timestep, median quantile
+                        elif preds.ndim == 2 and preds.shape[1] == 7:
+                            preds = preds[:, 3]  # Get median quantile
+                        elif preds.ndim == 2 and preds.shape[1] == 1:
+                            preds = preds[:, 0]
+                        else:
+                            preds = preds[:, 0] if preds.ndim > 1 else preds
+                        
+                        # Get actual values
+                        if isinstance(y, tuple):
+                            actuals = y[0][:, 0]  # Get first timestep
+                        else:
+                            actuals = y[:, 0] if y.ndim > 1 else y
+                        
+                        # Move to CPU and store
+                        all_predictions.extend(preds.detach().cpu().numpy())
+                        all_actuals.extend(actuals.detach().cpu().numpy())
+                
+                # Convert to numpy arrays
+                pred_values = np.array(all_predictions)
+                actual_values = np.array(all_actuals)
+                
+                # Convert to variance scale
+                pred_var = np.exp(pred_values)
+                actual_var = np.exp(actual_values)
+                
+                # Filter valid values
+                valid_mask = (actual_var > 1e-8) & (pred_var > 1e-8) & np.isfinite(actual_var) & np.isfinite(pred_var)
+                pred_var_valid = pred_var[valid_mask]
+                actual_var_valid = actual_var[valid_mask]
+                
+                if len(pred_var_valid) > 0:
+                    # Calculate metrics
+                    rmse_val = rmse(actual_var_valid, pred_var_valid)
+                    accuracy_val = calculate_directional_accuracy(actual_var_valid, pred_var_valid)
+                    
+                    # Log metrics
+                    epoch_num = trainer.current_epoch + 1
+                    print(f"\n  [Epoch {epoch_num:3d}] RMSE={rmse_val:.4f} | Directional Accuracy={accuracy_val:.4f} ({accuracy_val*100:.2f}%)")
+                
+                # Return model to training mode
+                pl_module.train()
+                
+            except Exception as e:
+                # Silent fail to avoid interrupting training
+                pl_module.train()  # Make sure model is back in training mode
+                pass
+
+# Configure trainer
+early_stop_callback = EarlyStopping(
+    monitor='val_loss',
+    min_delta=1e-4,
+    patience=20,
+    verbose=False,
+    mode='min'
+)
+
+# Create metrics callback
+metrics_callback = TFTMetricsCallback(val_dataloader, None, log_every_n_epochs=1)  # Will set model after instantiation
+
+# %%
+trainer = Trainer(
+    max_epochs=500,
+    accelerator='gpu' if torch.cuda.is_available() else 'cpu',  # Use CUDA if available, else CPU
+    devices=1,  # Use single GPU
+    enable_model_summary=True,
+    gradient_clip_val=0.1,
+    callbacks=[early_stop_callback, metrics_callback],
+    enable_progress_bar=True,
+    enable_checkpointing=False,
+    logger=False,
+)
+
+# %%
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Combine all predictors (volatility estimators + exogenous variables)
+predictors = pd.concat([data['train_x'], data['train_exo']], axis=1)
+
+# Create a 3x3 grid for 9 predictors
+fig, axes = plt.subplots(nrows=3, ncols=3, figsize=(15, 10))
+axes = axes.flatten()  # Flatten for easy indexing
+
+for i, col in enumerate(predictors.columns):
+    sns.histplot(predictors[col], ax=axes[i], kde=True, bins=50)
+    axes[i].set_title(f'Distribution of {col}', fontsize=12)
+    axes[i].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+print("✓ Trainer configured")
+print(f"  Device: {'GPU (CUDA)' if torch.cuda.is_available() else 'CPU'}")
+print("  Max epochs: 500")
+print("  Early stopping patience: 20")
+print("  Live metrics logging: RMSE and Directional Accuracy (every epoch)")
 # %%
 
 # Prepare data for TFT
@@ -2112,7 +2346,7 @@ print("="*80)
 
 # Create comprehensive comparison
 create_comprehensive_comparison(
-    ml_ensemble_results, ml_model_types, tft_qlike, tft_mspe, report, plt
+    ml_evaluation_results, windows, ml_model_types, tft_qlike, tft_mspe, report, plt
 )
 
 # %%

@@ -19,50 +19,73 @@ class VolatilityReportGeneratorStats:
         # Report file
         self.report_file = self.base_dir / f"{report_name}_{self.timestamp}.md"
         
+        # TOC tracking
+        self.toc_entries = []
+        self.toc_marker = "<!-- TOC_END -->"
+        
         # Initialize report
         self._init_report()
         
     def _init_report(self):
-        """Initialize the markdown report with title and TOC"""
+        """Initialize the markdown report with title and dynamic TOC"""
         with open(self.report_file, 'w') as f:
             f.write(f"# Volatility Forecasting Report\n\n")
             f.write(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             f.write(f"**Author:** PhD Research Team\n\n")
             f.write(f"---\n\n")
             f.write(f"## Table of Contents\n\n")
-            f.write(f"1. [Executive Summary](#executive-summary)\n")
-            f.write(f"2. [Data Description](#data-description)\n")
-            f.write(f"3. [Methodology](#methodology)\n")
-            f.write(f"4. [Volatility Estimators Analysis](#volatility-estimators-analysis)\n")
-            f.write(f"5. [HAR Model Results](#har-model-results)\n")
-            f.write(f"6. [HAR-X Model Results](#har-x-model-results)\n")
-            f.write(f"7. [Model Comparison](#model-comparison)\n")
-            f.write(f"8. [Test Set Evaluation](#test-set-evaluation)\n")
-            f.write(f"9. [Conclusions](#conclusions)\n")
-            f.write(f"10. [Appendix](#appendix)\n")
-            f.write(f"    - [Volatility Estimators](#volatility-estimators-used)\n")
-            f.write(f"    - [HAR Model Specification](#har-model-specification)\n")
-            f.write(f"    - [Exogenous Variables (HARX)](#exogenous-variables-harx)\n")
-            f.write(f"    - [Metrics](#metrics)\n")
-            f.write(f"    - [Machine Learning Models](#machine-learning-models-5-models)\n")
-            f.write(f"        - [Random Forest (RF)](#rf-model-charts)\n")
-            f.write(f"        - [Gradient Boosting (GBM)](#gbm-model-charts)\n")
-            f.write(f"        - [XGBoost](#xgboost-model-charts)\n")
-            f.write(f"        - [LightGBM](#lightgbm-model-charts)\n")
-            f.write(f"        - [CatBoost](#catboost-model-charts)\n")
-            f.write(f"    - [Deep Learning Model](#deep-learning-model)\n")
-            f.write(f"        - [Temporal Fusion Transformer (TFT)](#temporal-fusion-transformer-tft-results)\n")
-            f.write(f"    - [Comparative Analysis](#comparative-analysis)\n")
-            f.write(f"        - [ML Models Performance Summary](#ml-models-performance-training-set)\n")
-            f.write(f"        - [ML Models Rankings](#ml-models-analysis--recommendations)\n")
-            f.write(f"        - [TFT Detailed Metrics](#tft-model-performance-validation-set)\n")
-            f.write(f"        - [Comprehensive Model Comparison](#comprehensive-model-comparison)\n\n")
+            f.write(f"{self.toc_marker}\n\n")
             f.write(f"---\n\n")
     
     def add_section(self, title, level=2):
-        """Add a section header"""
+        """Add a section header and update TOC"""
         with open(self.report_file, 'a') as f:
             f.write(f"\n{'#' * level} {title}\n\n")
+        
+        # Track this section for TOC
+        self._add_to_toc(title, level)
+    
+    def _add_to_toc(self, title, level):
+        """Add entry to TOC (will be written at finalization)"""
+        # Create anchor from title (lowercase, replace spaces with hyphens, remove special chars)
+        anchor = title.lower()
+        anchor = anchor.replace(' ', '-').replace('(', '').replace(')', '').replace('&', '')
+        anchor = anchor.replace(',', '').replace(':', '').replace('/', '').replace("'", '')
+        
+        # Determine indentation based on level
+        indent = "    " * (level - 2) if level > 2 else ""
+        
+        # Create TOC entry
+        if level == 2:
+            toc_entry = f"{len([e for e in self.toc_entries if not e.startswith(' ')]) + 1}. [{title}](#{anchor})"
+        else:
+            toc_entry = f"{indent}- [{title}](#{anchor})"
+        
+        self.toc_entries.append(toc_entry)
+    
+    def _update_toc_in_file(self):
+        """Rewrite the TOC section in the report file (call once at the end)"""
+        # Read current content
+        with open(self.report_file, 'r') as f:
+            content = f.read()
+        
+        # Find TOC marker position
+        if self.toc_marker in content:
+            # Split at marker
+            before_toc, after_toc = content.split(self.toc_marker, 1)
+            
+            # Rebuild TOC from scratch
+            toc_text = "\n".join(self.toc_entries) + "\n\n"
+            
+            # Reconstruct content
+            new_content = before_toc + toc_text + self.toc_marker + after_toc
+            
+            # Write back
+            with open(self.report_file, 'w') as f:
+                f.write(new_content)
+        else:
+            # Fallback: just append if marker not found
+            print("⚠ Warning: TOC marker not found, skipping TOC update")
     
     def add_text(self, text):
         """Add text content"""
@@ -70,12 +93,42 @@ class VolatilityReportGeneratorStats:
             f.write(f"{text}\n\n")
     
     def add_table(self, df, caption=""):
-        """Add a pandas DataFrame as markdown table"""
+        """Add a pandas DataFrame as markdown table with formatting"""
+        # Format floats to 3 decimal places
+        df_formatted = df.copy()
+        for col in df_formatted.columns:
+            if df_formatted[col].dtype in ['float64', 'float32']:
+                df_formatted[col] = df_formatted[col].apply(lambda x: f"{x:.3f}" if pd.notna(x) else x)
+        
+        # Split table if more than 4 columns
         with open(self.report_file, 'a') as f:
-            if caption:
-                f.write(f"**{caption}**\n\n")
-            f.write(df.to_markdown())
-            f.write("\n\n")
+            if len(df_formatted.columns) <= 4:
+                # Table fits - write it directly
+                if caption:
+                    f.write(f"**{caption}**\n\n")
+                f.write(df_formatted.to_markdown())
+                f.write("\n\n")
+            else:
+                # Split into chunks of 4 columns
+                cols = list(df_formatted.columns)
+                num_chunks = (len(cols) + 3) // 4  # Ceiling division
+                
+                for i in range(num_chunks):
+                    start_idx = i * 4
+                    end_idx = min((i + 1) * 4, len(cols))
+                    chunk_cols = cols[start_idx:end_idx]
+                    df_chunk = df_formatted[chunk_cols]
+                    
+                    # Add caption with part number
+                    if caption:
+                        if num_chunks > 1:
+                            chunk_caption = f"{caption} (Part {i+1}/{num_chunks})"
+                        else:
+                            chunk_caption = caption
+                        f.write(f"**{chunk_caption}**\n\n")
+                    
+                    f.write(df_chunk.to_markdown())
+                    f.write("\n\n")
     
     def save_and_add_plot(self, fig, filename, caption="", width=800):
         """Save matplotlib figure and add to report"""
@@ -115,7 +168,11 @@ class VolatilityReportGeneratorStats:
             f.write("\n```\n\n")
     
     def finalize_report(self):
-        """Finalize the report"""
+        """Finalize the report and update TOC"""
+        # First, update the TOC with all collected entries
+        self._update_toc_in_file()
+        
+        # Then add closing
         with open(self.report_file, 'a') as f:
             f.write(f"\n---\n\n")
             f.write(f"*Report generated on {datetime.now().strftime('%Y-%m-%d at %H:%M:%S')}*\n")
@@ -155,6 +212,7 @@ class VolatilityReportGeneratorML:
         self.run_number = 1
         self.is_appending = False
         self.toc_entries = []  # Track TOC entries for dynamic updates
+        self.toc_marker = "<!-- TOC_END -->"  # Marker to find TOC end position
         
         # Try to find and append to latest report
         report_files = sorted(self.report_folder.glob(f"{self.report_name}_*.md"), reverse=True)
@@ -180,7 +238,7 @@ class VolatilityReportGeneratorML:
             self._init_report()
         
     def _init_report(self):
-        """Initialize a new markdown report"""
+        """Initialize a new markdown report with dynamic TOC"""
         report_text = f"""# ML & TFT Models Report
 
 **Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -189,21 +247,7 @@ class VolatilityReportGeneratorML:
 
 ## Table of Contents
 
-### Machine Learning Models (5 Models)
-1. [Random Forest (RF)](#rf-model-charts)
-2. [Gradient Boosting (GBM)](#gbm-model-charts)
-3. [XGBoost](#xgboost-model-charts)
-4. [LightGBM](#lightgbm-model-charts)
-5. [CatBoost](#catboost-model-charts)
-
-### Deep Learning Model
-6. [Temporal Fusion Transformer (TFT)](#temporal-fusion-transformer-tft-results)
-
-### Comparative Analysis
-7. [ML Models Performance Summary](#ml-models-performance-training-set)
-8. [ML Models Rankings](#ml-models-analysis--recommendations)
-9. [TFT Detailed Metrics](#tft-model-performance-validation-set)
-10. [Comprehensive Model Comparison](#comprehensive-model-comparison)
+{self.toc_marker}
 
 ---
 
@@ -237,11 +281,56 @@ class VolatilityReportGeneratorML:
         print(f"✓ Table of Contents already includes ML models section")
     
     def add_section(self, title, level=2):
-        """Add a section heading"""
+        """Add a section heading and update TOC"""
         section_text = f"\n{'#' * level} {title}\n\n"
         with open(self.report_file, 'a') as f:
             f.write(section_text)
         self.report_content += section_text
+        
+        # Track this section for TOC
+        self._add_to_toc(title, level)
+    
+    def _add_to_toc(self, title, level):
+        """Add entry to TOC (will be written at finalization)"""
+        # Create anchor from title (lowercase, replace spaces with hyphens, remove special chars)
+        anchor = title.lower()
+        anchor = anchor.replace(' ', '-').replace('(', '').replace(')', '').replace('&', '')
+        anchor = anchor.replace(',', '').replace(':', '').replace('/', '').replace("'", '')
+        
+        # Determine indentation based on level
+        indent = "    " * (level - 2) if level > 2 else ""
+        
+        # Create TOC entry
+        if level == 2:
+            toc_entry = f"{len([e for e in self.toc_entries if not e.startswith(' ')]) + 1}. [{title}](#{anchor})"
+        else:
+            toc_entry = f"{indent}- [{title}](#{anchor})"
+        
+        self.toc_entries.append(toc_entry)
+    
+    def _update_toc_in_file(self):
+        """Rewrite the TOC section in the report file (call once at the end)"""
+        # Read current content
+        with open(self.report_file, 'r') as f:
+            content = f.read()
+        
+        # Find TOC marker position
+        if self.toc_marker in content:
+            # Split at marker
+            before_toc, after_toc = content.split(self.toc_marker, 1)
+            
+            # Rebuild TOC from scratch
+            toc_text = "\n".join(self.toc_entries) + "\n\n"
+            
+            # Reconstruct content
+            new_content = before_toc + toc_text + self.toc_marker + after_toc
+            
+            # Write back
+            with open(self.report_file, 'w') as f:
+                f.write(new_content)
+            
+            # Update in-memory content
+            self.report_content = new_content
     
     def add_text(self, text):
         """Add text content"""
@@ -251,11 +340,41 @@ class VolatilityReportGeneratorML:
         self.report_content += text_block
     
     def add_table(self, df, caption=""):
-        """Add a table in markdown format"""
+        """Add a table in markdown format with formatting"""
+        # Format floats to 3 decimal places
+        df_formatted = df.copy()
+        for col in df_formatted.columns:
+            if df_formatted[col].dtype in ['float64', 'float32']:
+                df_formatted[col] = df_formatted[col].apply(lambda x: f"{x:.3f}" if pd.notna(x) else x)
+        
+        # Split table if more than 4 columns
         table_text = ""
-        if caption:
-            table_text += f"**{caption}**\n\n"
-        table_text += df.to_markdown() + "\n\n"
+        
+        if len(df_formatted.columns) <= 4:
+            # Table fits - write it directly
+            if caption:
+                table_text += f"**{caption}**\n\n"
+            table_text += df_formatted.to_markdown() + "\n\n"
+        else:
+            # Split into chunks of 4 columns
+            cols = list(df_formatted.columns)
+            num_chunks = (len(cols) + 3) // 4  # Ceiling division
+            
+            for i in range(num_chunks):
+                start_idx = i * 4
+                end_idx = min((i + 1) * 4, len(cols))
+                chunk_cols = cols[start_idx:end_idx]
+                df_chunk = df_formatted[chunk_cols]
+                
+                # Add caption with part number
+                if caption:
+                    if num_chunks > 1:
+                        chunk_caption = f"{caption} (Part {i+1}/{num_chunks})"
+                    else:
+                        chunk_caption = caption
+                    table_text += f"**{chunk_caption}**\n\n"
+                
+                table_text += df_chunk.to_markdown() + "\n\n"
         
         with open(self.report_file, 'a') as f:
             f.write(table_text)
@@ -306,7 +425,11 @@ class VolatilityReportGeneratorML:
         self.add_metrics_summary(metrics_dict, title=f"{model_name} Performance Metrics")
     
     def finalize_report(self, final_message="Report generation completed"):
-        """Finalize the report with a closing message"""
+        """Finalize the report with a closing message and update TOC"""
+        # First, update the TOC with all collected entries
+        self._update_toc_in_file()
+        
+        # Then add closing
         closing = f"""
 ---
 
