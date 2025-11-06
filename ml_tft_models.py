@@ -76,67 +76,8 @@ print("✓ All libraries imported successfully")
 # ==============================================================================
 # HELPER CLASSES AND FUNCTIONS
 # ==============================================================================
-
-def qlike(y_true, y_pred):
-    """Corrected Quasi-Likelihood (QLIKE) loss function."""
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-
-    # Avoid invalid values before division/log operations
-    y_pred = np.where(y_pred <= 0, 1e-8, y_pred)
-    y_true = np.where(y_true <= 0, 1e-8, y_true)
-
-    return np.log(y_pred) + (y_true / y_pred)
-
-def mspe(y_true, y_pred):
-    """Mean Squared Percentage Error loss function."""
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    
-    # Avoid division by zero
-    y_true[y_true == 0] = 1e-8
-    
-    return ((y_true - y_pred) / y_true) ** 2
-
-def rmse(y_true, y_pred):
-    """Root Mean Squared Error."""
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    return np.sqrt(np.mean((y_true - y_pred) ** 2))
-
-def calculate_directional_accuracy(y_true, y_pred):
-    """
-    Calculate directional accuracy for volatility forecasting.
-    Measures if predicted volatility trend matches actual trend.
-    
-    Parameters:
-    -----------
-    y_true : array-like
-        Actual values
-    y_pred : array-like
-        Predicted values
-        
-    Returns:
-    --------
-    float : Directional accuracy (0-1)
-    """
-    y_true = np.asarray(y_true)
-    y_pred = np.asarray(y_pred)
-    
-    # Calculate changes
-    true_changes = np.diff(y_true)
-    pred_changes = np.diff(y_pred)
-    
-    # Check if direction matches (both positive or both negative)
-    direction_match = np.sign(true_changes) == np.sign(pred_changes)
-    
-    # Calculate accuracy
-    accuracy = np.mean(direction_match)
-    return accuracy
-
-# ==============================================================================
-# HELPER CLASSES AND FUNCTIONS
-# ==============================================================================
+# Note: All metric functions now used from vol_models.Metrics.Metric_Evaluation
+# Including: qlike, mspe, rmse, calculate_directional_accuracy
 
 print("✓ Report generator class loaded")
 
@@ -601,7 +542,7 @@ class ML_Volatility_Model:
 # ## Train ML Models
 
 # %%
-def _train_single_model(model_name, model_params, X_combined, y_combined, window, use_gpu=True):
+def _train_single_model(model_name, model_params, X_combined, y_combined, window, use_gpu=True, train_every_k=5):
     """
     Helper function to train a single model - designed for parallel execution.
     
@@ -619,6 +560,8 @@ def _train_single_model(model_name, model_params, X_combined, y_combined, window
         Rolling window size
     use_gpu : bool
         Whether to attempt GPU usage (can be disabled for parallel CPU training)
+    train_every_k : int
+        Train a new model every K days (default=5 for 5x speedup)
         
     Returns:
     --------
@@ -656,7 +599,7 @@ def _train_single_model(model_name, model_params, X_combined, y_combined, window
         print(f"\n⚠ Error training {model_name} (window={window}): {str(e)}")
         raise
 
-def train_ml_models_rolling_window(full_x, full_y, full_exo, report, windows=[252, 504, 756], n_jobs=-1, use_gpu=True):
+def train_ml_models_rolling_window(full_x, full_y, full_exo, report, windows=[252, 504, 756], n_jobs=-1, use_gpu=True, train_every_k=5):
     """
     Train ML models using ROLLING WINDOW approach with ALL features.
     Uses parallel processing to train multiple models simultaneously.
@@ -684,6 +627,8 @@ def train_ml_models_rolling_window(full_x, full_y, full_exo, report, windows=[25
     use_gpu : bool
         Whether to use GPU acceleration (if available). 
         Note: Set to False if experiencing GPU conflicts in parallel mode
+    train_every_k : int
+        Train a new model every K days (default=5 for 5x speedup)
         
     Returns:
     --------
@@ -794,14 +739,14 @@ def train_ml_models_rolling_window(full_x, full_y, full_exo, report, windows=[25
         results_list = []
         for job_idx, (model_name, w) in enumerate(training_jobs, 1):
             print(f"[{job_idx}/{total_jobs}] Training {model_name.upper()} (window={w})...", end=" ")
-            result = _train_single_model(model_name, model_params, X_combined, y_combined, w)
+            result = _train_single_model(model_name, model_params, X_combined, y_combined, w, use_gpu, train_every_k)
             results_list.append(result)
             print(f"✓ ({result[3]:.2f}s) Predictions: {result[4]}")
     else:
         # Parallel training
         print(f"Running PARALLEL training ({actual_jobs} jobs)...\n")
         results_list = Parallel(n_jobs=actual_jobs, verbose=10)(
-            delayed(_train_single_model)(model_name, model_params, X_combined, y_combined, w)
+            delayed(_train_single_model)(model_name, model_params, X_combined, y_combined, w, use_gpu, train_every_k)
             for model_name, w in training_jobs
         )
     
@@ -876,15 +821,18 @@ def evaluate_ml_models(ml_results_by_window, windows, ml_model_types):
             y_true_var = np.exp(y_true_log)
             
             # Calculate performance metrics
-            qlike_scores = pd.Series(qlike(y_true_var, y_pred_var), index=y_pred_var.index)
-            mspe_scores_raw = pd.Series(mspe(y_true_var, y_pred_var), index=y_pred_var.index)
+            qlike_scores = pd.Series(Metric_Evaluation.qlike(y_true_var, y_pred_var), index=y_pred_var.index)
+            mspe_scores_raw = pd.Series(Metric_Evaluation.mspe(y_true_var, y_pred_var), index=y_pred_var.index)
             
             # Filter MSPE for numerical stability
             valid_mask = y_true_var > 1e-6
             mspe_scores = mspe_scores_raw[valid_mask]
             
-            # Calculate RMSE
-            rmse_score = rmse(y_true_var, y_pred_var)
+            # Calculate RMSE (note: vol_models.Metrics.rmse has rolling window, we need simple RMSE)
+            rmse_score = np.sqrt(np.mean((y_true_var - y_pred_var) ** 2))
+            
+            # Calculate directional accuracy
+            directional_acc = Metric_Evaluation.calculate_directional_accuracy(y_true_var, y_pred_var)
             
             # Store results
             ml_evaluation_results[w][model_name] = {
@@ -895,217 +843,18 @@ def evaluate_ml_models(ml_results_by_window, windows, ml_model_types):
                 'qlike': qlike_scores,
                 'mspe': mspe_scores,
                 'rmse': rmse_score,
+                'directional_accuracy': directional_acc,
                 'qlike_mean': qlike_scores.mean(),
                 'qlike_std': qlike_scores.std(),
                 'mspe_mean': mspe_scores.mean(),
                 'mspe_std': mspe_scores.std()
             }
             
-            print(f"✓ QLIKE: {qlike_scores.mean():.4f}, MSPE: {mspe_scores.mean():.4f}, RMSE: {rmse_score:.4f}")
+            print(f"✓ QLIKE: {qlike_scores.mean():.4f}, MSPE: {mspe_scores.mean():.4f}, RMSE: {rmse_score:.4f}, Dir.Acc: {directional_acc:.4f} ({directional_acc*100:.2f}%)")
     
     print("\n✓ ML model evaluation completed for all windows")
     return ml_evaluation_results
 
-
-# %%
-def add_model_charts_to_report_old_unused(model_results, model_name, report):
-    """
-    Generate and add charts for a single ML model to the report.
-    """
-    report.add_section(f"{model_name.upper()} Model Charts", level=4)
-    
-    # Data for plots
-    y_true_var = model_results['y_true_var']
-    y_pred_var = model_results['y_pred_var']
-    qlike = model_results['qlike']
-    mspe = model_results['mspe']
-    residuals = y_pred_var - y_true_var
-    
-    # Filter out infinite and NaN values from mspe for plotting
-    mspe_clean = mspe.replace([np.inf, -np.inf], np.nan).dropna()
-    if len(mspe_clean) == 0:
-        # If all values are invalid, create clean mspe by recalculating with safeguards
-        mspe_safe = np.where(y_true_var > 0, ((y_true_var - y_pred_var) / y_true_var) ** 2, np.nan)
-        mspe_clean = pd.Series(mspe_safe, index=y_true_var.index).dropna()
-    
-    # Calculate RMSE
-    model_rmse = rmse(y_true_var, y_pred_var)
-    
-    # 1. Main Performance Charts (4 panels)
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-    fig.suptitle(f'{model_name.upper()} Performance Analysis', fontsize=16, fontweight='bold')
-    
-    # 1.1 Actual vs Predicted Volatility
-    axes[0, 0].plot(y_true_var.index, y_true_var, label='Actual Variance', color='black', linewidth=1)
-    axes[0, 0].plot(y_pred_var.index, y_pred_var, label='Predicted Variance', color='blue', alpha=0.7, linewidth=1)
-    axes[0, 0].set_title('Actual vs. Predicted Variance', fontweight='bold')
-    axes[0, 0].set_xlabel('Date')
-    axes[0, 0].set_ylabel('Variance')
-    axes[0, 0].legend()
-    axes[0, 0].grid(True, alpha=0.3)
-    
-    # 1.2 QLIKE Loss Over Time
-    axes[0, 1].plot(qlike.index, qlike, label='QLIKE Loss', color='orange', linewidth=1.5)
-    axes[0, 1].axhline(qlike.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {qlike.mean():.4f}')
-    axes[0, 1].set_title('QLIKE Loss Over Time', fontweight='bold')
-    axes[0, 1].set_xlabel('Date')
-    axes[0, 1].set_ylabel('QLIKE')
-    axes[0, 1].legend()
-    axes[0, 1].grid(True, alpha=0.3)
-    
-    # 1.3 Residuals Over Time
-    axes[1, 0].plot(residuals.index, residuals, label='Residuals', color='purple', alpha=0.7, linewidth=1)
-    axes[1, 0].axhline(0, color='black', linestyle='--', linewidth=1)
-    axes[1, 0].set_title('Residuals (Predicted - Actual)', fontweight='bold')
-    axes[1, 0].set_xlabel('Date')
-    axes[1, 0].set_ylabel('Error')
-    axes[1, 0].grid(True, alpha=0.3)
-    
-    # 1.4 ACF of Residuals
-    plot_acf(residuals.dropna(), ax=axes[1, 1], lags=40, title='ACF of Residuals')
-    axes[1, 1].grid(True, alpha=0.3)
-    
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
-    report.save_and_add_plot(fig, f"{model_name}_performance_charts", caption=f"Figure: {model_name.upper()} Performance Charts")
-    plt.close()
-    
-    # 2. Actual vs Predicted Detailed Plot
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-    fig.suptitle(f'{model_name.upper()} - Actual vs Predicted Analysis', fontsize=14, fontweight='bold')
-    
-    # 2.1 Time series plot
-    axes[0].plot(y_true_var.index, y_true_var, label='Actual Variance', color='black', linewidth=2, alpha=0.8)
-    axes[0].plot(y_pred_var.index, y_pred_var, label='Predicted Variance', color='blue', linewidth=2, alpha=0.7)
-    axes[0].fill_between(y_true_var.index, y_true_var, y_pred_var, alpha=0.2, color='gray', label='Prediction Error')
-    axes[0].set_title('Time Series: Actual vs Predicted', fontweight='bold', fontsize=12)
-    axes[0].set_xlabel('Date', fontsize=11)
-    axes[0].set_ylabel('Variance', fontsize=11)
-    axes[0].legend(fontsize=10)
-    axes[0].grid(True, alpha=0.3)
-    
-    # Add statistics text
-    corr = np.corrcoef(y_true_var, y_pred_var)[0, 1]
-    mae = np.mean(np.abs(y_true_var - y_pred_var))
-    axes[0].text(0.02, 0.98, f'Correlation: {corr:.4f}\nMAE: {mae:.6f}\nRMSE: {model_rmse:.6f}', 
-                transform=axes[0].transAxes, fontsize=10, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-    
-    # 2.2 Scatter plot with density
-    axes[1].scatter(y_true_var, y_pred_var, alpha=0.5, s=30, color='steelblue', edgecolor='navy', linewidth=0.5)
-    
-    # Perfect prediction line
-    min_val = min(y_true_var.min(), y_pred_var.min())
-    max_val = max(y_true_var.max(), y_pred_var.max())
-    axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2.5, label='Perfect Prediction', alpha=0.8)
-    
-    # Add regression line
-    z = np.polyfit(y_true_var, y_pred_var, 1)
-    p = np.poly1d(z)
-    axes[1].plot(y_true_var.sort_values(), p(y_true_var.sort_values()), 
-                "g-", linewidth=2, alpha=0.7, label=f'Fit: y={z[0]:.3f}x+{z[1]:.3f}')
-    
-    axes[1].set_title('Scatter: Actual vs Predicted', fontweight='bold', fontsize=12)
-    axes[1].set_xlabel('Actual Variance', fontsize=11)
-    axes[1].set_ylabel('Predicted Variance', fontsize=11)
-    axes[1].legend(fontsize=10)
-    axes[1].grid(True, alpha=0.3)
-    axes[1].set_aspect('equal', adjustable='box')
-    
-    # Add R² text
-    r2 = r2_score(y_true_var, y_pred_var)
-    axes[1].text(0.02, 0.98, f'R² Score: {r2:.4f}\nCorrelation: {corr:.4f}', 
-                transform=axes[1].transAxes, fontsize=10, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, f"{model_name}_actual_vs_predicted", 
-                            caption=f"Figure: {model_name.upper()} Actual vs Predicted Variance - Time Series and Scatter Plot")
-    plt.close()
-    
-    # 3. QLIKE Distribution Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(f'{model_name.upper()} - QLIKE Distribution', fontsize=14, fontweight='bold')
-    
-    axes[0].hist(qlike, bins=50, color='steelblue', alpha=0.7, edgecolor='black')
-    axes[0].axvline(qlike.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {qlike.mean():.4f}')
-    axes[0].axvline(qlike.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {qlike.median():.4f}')
-    axes[0].set_title('QLIKE Distribution (Histogram)', fontweight='bold')
-    axes[0].set_xlabel('QLIKE Value')
-    axes[0].set_ylabel('Frequency')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3, axis='y')
-    
-    axes[1].boxplot(qlike, vert=True, patch_artist=True)
-    axes[1].set_title('QLIKE Distribution (Box Plot)', fontweight='bold')
-    axes[1].set_ylabel('QLIKE Value')
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, f"{model_name}_qlike_distribution", caption=f"Figure: {model_name.upper()} QLIKE Distribution Analysis")
-    plt.close()
-    
-    # 3. MSPE Distribution Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(f'{model_name.upper()} - MSPE Distribution', fontsize=14, fontweight='bold')
-    
-    axes[0].hist(mspe_clean, bins=50, color='coral', alpha=0.7, edgecolor='black')
-    axes[0].axvline(mspe_clean.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {mspe_clean.mean():.4f}')
-    axes[0].axvline(mspe_clean.median(), color='green', linestyle='--', linewidth=2, label=f'Median: {mspe_clean.median():.4f}')
-    axes[0].set_title('MSPE Distribution (Histogram)', fontweight='bold')
-    axes[0].set_xlabel('MSPE Value')
-    axes[0].set_ylabel('Frequency')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3, axis='y')
-    
-    axes[1].boxplot(mspe_clean, vert=True, patch_artist=True)
-    axes[1].set_title('MSPE Distribution (Box Plot)', fontweight='bold')
-    axes[1].set_ylabel('MSPE Value')
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, f"{model_name}_mspe_distribution", caption=f"Figure: {model_name.upper()} MSPE Distribution Analysis")
-    plt.close()
-    
-    # 5. RMSE Analysis Plot
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle(f'{model_name.upper()} - RMSE Analysis', fontsize=14, fontweight='bold')
-    
-    # RMSE over time (rolling window)
-    rmse_rolling = pd.Series(residuals ** 2, index=residuals.index).rolling(window=20).mean().apply(np.sqrt)
-    axes[0].plot(rmse_rolling.index, rmse_rolling, color='darkblue', linewidth=1.5, label='Rolling RMSE (20-day window)')
-    axes[0].axhline(model_rmse, color='red', linestyle='--', linewidth=2, label=f'Overall RMSE: {model_rmse:.4f}')
-    axes[0].set_title('RMSE Over Time', fontweight='bold')
-    axes[0].set_xlabel('Date')
-    axes[0].set_ylabel('RMSE')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-    
-    # Actual vs Predicted Scatter with RMSE
-    axes[1].scatter(y_true_var, y_pred_var, alpha=0.5, s=20, color='steelblue')
-    axes[1].plot([y_true_var.min(), y_true_var.max()], [y_true_var.min(), y_true_var.max()], 
-                 'r--', linewidth=2, label='Perfect Prediction')
-    axes[1].set_title(f'Actual vs Predicted (RMSE: {model_rmse:.4f})', fontweight='bold')
-    axes[1].set_xlabel('Actual Variance')
-    axes[1].set_ylabel('Predicted Variance')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-    
-    plt.tight_layout()
-    report.save_and_add_plot(fig, f"{model_name}_rmse_analysis", caption=f"Figure: {model_name.upper()} RMSE Analysis")
-    plt.close()
-    
-    # 6. Summary Statistics Table
-    summary_stats = {
-        'Metric': ['QLIKE', 'MSPE', 'RMSE'],
-        'Mean': [qlike.mean(), mspe_clean.mean(), model_rmse],
-        'Std': [qlike.std(), mspe_clean.std(), np.std(residuals)],
-        'Min': [qlike.min(), mspe_clean.min(), residuals.min()],
-        'Max': [qlike.max(), mspe_clean.max(), residuals.max()],
-        'Median': [qlike.median(), mspe_clean.median(), np.median(residuals)]
-    }
-    summary_df = pd.DataFrame(summary_stats).set_index('Metric')
-    report.add_text(f"\n**{model_name.upper()} Summary Statistics:**\n")
-    report.add_table(summary_df, caption=f"Table: {model_name.upper()} Detailed Performance Metrics")
 
 
 # %% [markdown]
@@ -1188,8 +937,8 @@ for multi-horizon time series forecasting. It combines:
 """)
     
     # Calculate additional metrics for TFT
-    tft_rmse = rmse(tft_actual_var, tft_pred_var)
-    tft_accuracy = calculate_directional_accuracy(tft_actual_var, tft_pred_var)
+    tft_rmse = np.sqrt(np.mean((tft_actual_var - tft_pred_var) ** 2))
+    tft_accuracy = Metric_Evaluation.calculate_directional_accuracy(tft_actual_var, tft_pred_var)
     
     # Filter out infinite and NaN values from tft_mspe for plotting
     tft_mspe_clean = tft_mspe.replace([np.inf, -np.inf], np.nan).dropna()
@@ -1356,7 +1105,7 @@ for multi-horizon time series forecasting. It combines:
 # Compare all models (HAR, HARX, ML models, TFT)
 
 # %%
-def create_comprehensive_comparison(ml_evaluation_results, windows, ml_model_types, tft_qlike, tft_mspe, report, plt):
+def create_comprehensive_comparison(ml_evaluation_results, windows, ml_model_types, tft_qlike, tft_mspe, tft_rmse, tft_accuracy, report, plt):
     """
     Create comprehensive comparison of all models across different window sizes.
     
@@ -1372,6 +1121,10 @@ def create_comprehensive_comparison(ml_evaluation_results, windows, ml_model_typ
         TFT QLIKE values
     tft_mspe : pd.Series
         TFT MSPE values
+    tft_rmse : float
+        TFT RMSE value
+    tft_accuracy : float
+        TFT directional accuracy
     report : VolatilityReportGenerator
         Report generator instance
     plt : matplotlib.pyplot
@@ -1422,6 +1175,7 @@ def create_comprehensive_comparison(ml_evaluation_results, windows, ml_model_typ
                 'QLIKE_mean': ml_evaluation_results[w][model_name]['qlike_mean'],
                 'MSPE_mean': ml_evaluation_results[w][model_name]['mspe_mean'],
                 'RMSE': ml_evaluation_results[w][model_name]['rmse'],
+                'Dir_Accuracy': ml_evaluation_results[w][model_name]['directional_accuracy'],
                 'Rank': 0
             })
     
@@ -1432,7 +1186,8 @@ def create_comprehensive_comparison(ml_evaluation_results, windows, ml_model_typ
         'Window': 'N/A',
         'QLIKE_mean': tft_qlike.mean() if tft_qlike is not None else np.nan,
         'MSPE_mean': tft_mspe.mean() if tft_mspe is not None else np.nan,
-        'RMSE': np.nan,
+        'RMSE': tft_rmse if tft_rmse is not None else np.nan,
+        'Dir_Accuracy': tft_accuracy if tft_accuracy is not None else np.nan,
         'Rank': 0
     })
     
@@ -1447,6 +1202,8 @@ def create_comprehensive_comparison(ml_evaluation_results, windows, ml_model_typ
     display_cols = ['Rank', 'Model', 'Type', 'Window', 'QLIKE_mean', 'MSPE_mean']
     if 'RMSE' in comparison_df.columns:
         display_cols.append('RMSE')
+    if 'Dir_Accuracy' in comparison_df.columns:
+        display_cols.append('Dir_Accuracy')
     comparison_df_display = comparison_df[display_cols]
     
     print("\n" + "="*80)
@@ -1573,10 +1330,10 @@ print("="*80)
 
 # Run complete analysis with ROLLING WINDOW approach
 print("\n" + "="*80)
-print("PHASE 1: TRAINING ML MODELS WITH ROLLING WINDOWS")
+print("PHASE 1: PREPARING TRAIN/TEST SPLIT")
 print("="*80)
 
-# Combine train and test data (use ALL data for rolling window)
+# Combine train and test data to get full dataset
 full_x = pd.concat([data['train_x'], data['test_x']], axis=0)
 full_y = pd.concat([data['train_y'], data['test_y']], axis=0)
 full_exo = pd.concat([data['train_exo'], data['test_exo']], axis=0)
@@ -1586,25 +1343,64 @@ print(f"  X: {full_x.shape}")
 print(f"  y: {full_y.shape}")
 print(f"  exo: {full_exo.shape}")
 
+# Define split date (matching statistical models)
+split_date = '2023-01-01'
+
+print(f"\n✓ Using split date: {split_date}")
+print(f"  Training period: {full_x.index.min()} to {full_x[full_x.index < split_date].index.max()}")
+print(f"  Test period: {full_x[full_x.index >= split_date].index.min()} to {full_x.index.max()}")
+
+# Split into train and test
+train_x_split = full_x[full_x.index < split_date]
+test_x_split = full_x[full_x.index >= split_date]
+
+train_y_split = full_y[full_y.index < split_date]
+test_y_split = full_y[full_y.index >= split_date]
+
+train_exo_split = full_exo[full_exo.index < split_date]
+test_exo_split = full_exo[full_exo.index >= split_date]
+
+print(f"\n✓ Data split completed:")
+print(f"  Training samples: {len(train_x_split)}")
+print(f"  Test samples: {len(test_x_split)}")
+
 # Define windows (matching stat model)
 rolling_windows = [252, 756]
+max_window = max(rolling_windows)
 
-# Train with rolling windows
+# For test evaluation, augment test data with trailing training data (for rolling window)
+print(f"\n✓ Augmenting test data with {max_window} days of trailing training data for rolling window...")
+test_x_aug = pd.concat([train_x_split.tail(max_window), test_x_split])
+test_y_aug = pd.concat([train_y_split.tail(max_window), test_y_split])
+test_exo_aug = pd.concat([train_exo_split.tail(max_window), test_exo_split])
+
+print(f"  Augmented test size: {len(test_x_aug)} samples")
+print(f"  First {max_window} samples used for initial rolling window")
+print(f"  Predictions will be generated for {len(test_x_split)} test samples")
+
+print("\n" + "="*80)
+print("PHASE 2: TRAINING ML MODELS ON TEST SET WITH ROLLING WINDOWS")
+print("="*80)
+print("Note: Models are trained on PAST data only (rolling window), predictions on TEST data")
+
+# Train with rolling windows ON TEST SET
 # Configuration options:
 # - n_jobs=-1: Use all CPU cores for parallel training (FASTEST for CPU)
 # - n_jobs=1: Sequential training (use with GPU to avoid conflicts)
 # - use_gpu=True: Enable GPU acceleration (recommended with n_jobs=1)
 # - use_gpu=False: CPU-only (safe for parallel training)
+# - train_every_k: Train every K days (default=5 for 5x speedup)
 
 # RECOMMENDED: Parallel CPU training (no GPU conflicts)
 ml_results_by_window, ml_training_times, ml_model_types, windows = train_ml_models_rolling_window(
-    full_x=full_x,
-    full_y=full_y,
-    full_exo=full_exo,
+    full_x=test_x_aug,      # Use augmented test data (includes trailing training for rolling window)
+    full_y=test_y_aug,      # Use augmented test targets
+    full_exo=test_exo_aug,  # Use augmented test exogenous variables
     report=report,
     windows=rolling_windows,
-    n_jobs=-1,      # Use all CPU cores for parallel training
-    use_gpu=False   # Disable GPU to avoid parallel conflicts (faster overall)
+    n_jobs=-1,          # Use all CPU cores for parallel training
+    use_gpu=False,      # Disable GPU to avoid parallel conflicts (faster overall)
+    train_every_k=5     # Train every 5 days for 5x speedup
 )
 
 # ALTERNATIVE: Sequential GPU training (if you prefer GPU)
@@ -1620,9 +1416,32 @@ ml_results_by_window, ml_training_times, ml_model_types, windows = train_ml_mode
 
 # %%
 
+# Filter predictions to TEST period only (remove augmented training data)
+print("\n" + "="*80)
+print("FILTERING PREDICTIONS TO TEST PERIOD ONLY")
+print("="*80)
+
+for w in rolling_windows:
+    for model_name in ml_model_types:
+        # Get predictions
+        predictions = ml_results_by_window[w][model_name]['predictions']
+        residuals = ml_results_by_window[w][model_name]['residuals']
+        y_true = ml_results_by_window[w][model_name]['y_true']
+        
+        # Filter to test period only (>= split_date)
+        test_mask = predictions.index >= split_date
+        
+        ml_results_by_window[w][model_name]['predictions'] = predictions[test_mask]
+        ml_results_by_window[w][model_name]['residuals'] = residuals[test_mask]
+        ml_results_by_window[w][model_name]['y_true'] = y_true[test_mask]
+        
+        print(f"  {model_name.upper()} (w={w}): {test_mask.sum()} test predictions (from {len(predictions)} total)")
+
+print("\n✓ All predictions filtered to test period")
+
 # Evaluate ML models for each window
 print("\n" + "="*80)
-print("PHASE 2: EVALUATING ML MODEL PERFORMANCE")
+print("PHASE 3: EVALUATING ML MODEL PERFORMANCE ON TEST SET")
 print("="*80)
 
 ml_evaluation_results = evaluate_ml_models(
@@ -1635,7 +1454,7 @@ ml_evaluation_results = evaluate_ml_models(
 
 # Add ML results to report
 print("\n" + "="*80)
-print("PHASE 3: ADDING ML RESULTS TO REPORT")
+print("PHASE 4: ADDING ML RESULTS TO REPORT")
 print("="*80)
 
 # Print summary for each window
@@ -1651,7 +1470,7 @@ print("\n✓ ML models analysis complete with rolling windows!")
 
 # Create comprehensive plots for each window
 print("\n" + "="*80)
-print("PHASE 4: GENERATING PLOTS FOR ROLLING WINDOW RESULTS")
+print("PHASE 5: GENERATING PLOTS FOR ROLLING WINDOW RESULTS")
 print("="*80)
 
 for w_idx, w in enumerate(rolling_windows, 1):
@@ -1761,7 +1580,7 @@ print("\n✓ All plots generated!")
 
 # Train TFT model (inlined from train_tft_model)
 print("\n" + "="*80)
-print("PHASE 4: IMPLEMENTING TEMPORAL FUSION TRANSFORMER (TFT)")
+print("PHASE 6: IMPLEMENTING TEMPORAL FUSION TRANSFORMER (TFT)")
 print("="*80)
 # %%
 
@@ -1769,216 +1588,9 @@ exo_cols = ['UST10Y', 'HYOAS', 'TermSpread_10Y_2Y', 'VIX', 'Breakeven10Y']
 estimators = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']
 
 # Apply preprocessing for TFT (clips outliers and scales features)
+# Note: We preprocess the original data dict which already has train/test split
 data, scalers = preprocess_predictors_for_tft(data)
 
-# %%
-
-# Prepare data for TFT
-print("Preparing TFT dataset...")
-tft_train_data = prepare_tft_data(
-    vol_data=data['train_x'][estimators],
-    exo_data=data['train_exo'][exo_cols],
-    y_true=data['train_y'],
-    max_encoder_length=22,
-    max_prediction_length=1
-)
-# %%
-print(f"✓ TFT training data prepared: {tft_train_data.shape}")
-print(f"  Columns: {list(tft_train_data.columns)}")
-print(f"  Date range: {tft_train_data['Date'].min()} to {tft_train_data['Date'].max()}")
-# %%
-# Define validation split (last 20% of training data)
-training_cutoff = int(tft_train_data['time_idx'].max() * 0.8)
-# Time-varying features (change over time)
-time_varying_known_reals = exo_cols  # Exogenous variables
-time_varying_unknown_reals = estimators + ['target']
-
-print(f"Training cutoff: {training_cutoff}")
-print(f"Time-varying known reals: {time_varying_known_reals}")
-print(f"Time-varying unknown reals: {time_varying_unknown_reals}")
-
-# Create TimeSeriesDataSet
-training_tft = TimeSeriesDataSet(
-    tft_train_data[tft_train_data['time_idx'] <= training_cutoff],
-    time_idx='time_idx',
-    target='target',
-    group_ids=['group'],
-    min_encoder_length=30,  # Reduced to keep more training samples
-    max_encoder_length=90,  # Keep longer lookback for volatility patterns
-    min_prediction_length=1,
-    max_prediction_length=1,
-    time_varying_known_reals=time_varying_known_reals,
-    time_varying_unknown_reals=time_varying_unknown_reals,
-    target_normalizer=GroupNormalizer(groups=["group"]),  # Re-enabled for better training
-    add_relative_time_idx=True,
-    add_target_scales=True,
-    add_encoder_length=True,
-)
-
-# Create validation dataset
-validation_tft = TimeSeriesDataSet.from_dataset(
-    training_tft,
-    tft_train_data[tft_train_data['time_idx'] > training_cutoff],
-    predict=False,
-    stop_randomization=True
-)
-
-# Create dataloaders
-batch_size = 16  # Increased for more stable gradients with preprocessed features
-train_dataloader = training_tft.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
-val_dataloader = validation_tft.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
-
-print(f"✓ TFT datasets created")
-print(f"  Training samples: {len(training_tft)}")
-print(f"  Validation samples: {len(validation_tft)}")
-print(f"  Batch size: {batch_size}")
-# %%
-# Configure TFT model
-print("\n" + "="*60)
-print("TRAINING TEMPORAL FUSION TRANSFORMER")
-print("="*60)
-
-tft = TemporalFusionTransformer.from_dataset(
-    training_tft,
-    learning_rate=0.0003,  # Lower LR for stable training with scaled features
-    hidden_size=64,      # Reduced to prevent overfitting on small dataset
-    attention_head_size=4,  # Appropriate for hidden_size=64
-    dropout=0.1,         # Lower dropout with better preprocessing
-    hidden_continuous_size=32,  # Reduced for dataset size
-    output_size=7,       # Multiple quantiles (keeping as requested)
-    loss=QuantileLoss(quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]),
-    log_interval=5,
-    reduce_on_plateau_patience=4,
-)
-
-print(f"✓ TFT model configured")
-print(f"  Hidden size: 64 (optimized for dataset size)")
-print(f"  Attention heads: 4")
-print(f"  Dropout: 0.1")
-print(f"  Learning rate: 0.0003 (stable for preprocessed features)")
-print(f"  Loss quantiles: {tft.loss.quantiles}")
-print(f"  Output: Multiple quantiles (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)")
-
-# Custom PyTorch Lightning Callback for logging RMSE and Accuracy
-try:
-    from lightning.pytorch.callbacks import Callback
-except ImportError:
-    from pytorch_lightning.callbacks import Callback
-
-class TFTMetricsCallback(Callback):
-    """PyTorch Lightning callback to log RMSE and accuracy during training."""
-    
-    def __init__(self, val_dataloader, model, log_every_n_epochs=1):
-        super().__init__()
-        self.val_dataloader = val_dataloader
-        self.model = model
-        self.log_every_n_epochs = log_every_n_epochs
-        
-    def on_validation_epoch_end(self, trainer, pl_module):
-        """Called at the end of each validation epoch."""
-        if (trainer.current_epoch + 1) % self.log_every_n_epochs == 0:
-            try:
-                # Put model in eval mode
-                pl_module.eval()
-                
-                # Collect predictions and actuals manually batch by batch
-                all_predictions = []
-                all_actuals = []
-                
-                with torch.no_grad():
-                    for batch_idx, batch in enumerate(self.val_dataloader):
-                        # Get batch data - handle device placement
-                        x, y = batch
-                        
-                        # Move to same device as model if needed
-                        if hasattr(pl_module, 'device'):
-                            device = pl_module.device
-                            # Move x dict tensors to device
-                            x = {k: v.to(device) if torch.is_tensor(v) else v for k, v in x.items()}
-                        
-                        # Forward pass to get predictions
-                        output = pl_module(x)
-                        
-                        # Extract predictions (median quantile)
-                        if hasattr(output, 'prediction'):
-                            preds = output.prediction
-                        else:
-                            preds = output
-                        
-                        # Handle quantile outputs
-                        if preds.ndim == 3:  # [batch, time, quantiles]
-                            preds = preds[:, 0, 3]  # Get first timestep, median quantile
-                        elif preds.ndim == 2 and preds.shape[1] == 7:
-                            preds = preds[:, 3]  # Get median quantile
-                        elif preds.ndim == 2 and preds.shape[1] == 1:
-                            preds = preds[:, 0]
-                        else:
-                            preds = preds[:, 0] if preds.ndim > 1 else preds
-                        
-                        # Get actual values
-                        if isinstance(y, tuple):
-                            actuals = y[0][:, 0]  # Get first timestep
-                        else:
-                            actuals = y[:, 0] if y.ndim > 1 else y
-                        
-                        # Move to CPU and store
-                        all_predictions.extend(preds.detach().cpu().numpy())
-                        all_actuals.extend(actuals.detach().cpu().numpy())
-                
-                # Convert to numpy arrays
-                pred_values = np.array(all_predictions)
-                actual_values = np.array(all_actuals)
-                
-                # Convert to variance scale
-                pred_var = np.exp(pred_values)
-                actual_var = np.exp(actual_values)
-                
-                # Filter valid values
-                valid_mask = (actual_var > 1e-8) & (pred_var > 1e-8) & np.isfinite(actual_var) & np.isfinite(pred_var)
-                pred_var_valid = pred_var[valid_mask]
-                actual_var_valid = actual_var[valid_mask]
-                
-                if len(pred_var_valid) > 0:
-                    # Calculate metrics
-                    rmse_val = rmse(actual_var_valid, pred_var_valid)
-                    accuracy_val = calculate_directional_accuracy(actual_var_valid, pred_var_valid)
-                    
-                    # Log metrics
-                    epoch_num = trainer.current_epoch + 1
-                    print(f"\n  [Epoch {epoch_num:3d}] RMSE={rmse_val:.4f} | Directional Accuracy={accuracy_val:.4f} ({accuracy_val*100:.2f}%)")
-                
-                # Return model to training mode
-                pl_module.train()
-                
-            except Exception as e:
-                # Silent fail to avoid interrupting training
-                pl_module.train()  # Make sure model is back in training mode
-                pass
-
-# Configure trainer
-early_stop_callback = EarlyStopping(
-    monitor='val_loss',
-    min_delta=1e-4,
-    patience=20,
-    verbose=False,
-    mode='min'
-)
-
-# Create metrics callback
-metrics_callback = TFTMetricsCallback(val_dataloader, None, log_every_n_epochs=1)  # Will set model after instantiation
-
-# %%
-trainer = Trainer(
-    max_epochs=500,
-    accelerator='gpu' if torch.cuda.is_available() else 'cpu',  # Use CUDA if available, else CPU
-    devices=1,  # Use single GPU
-    enable_model_summary=True,
-    gradient_clip_val=0.1,
-    callbacks=[early_stop_callback, metrics_callback],
-    enable_progress_bar=True,
-    enable_checkpointing=False,
-    logger=False,
-)
 
 # %%
 import matplotlib.pyplot as plt
@@ -2019,13 +1631,14 @@ print(f"✓ TFT training data prepared: {tft_train_data.shape}")
 print(f"  Columns: {list(tft_train_data.columns)}")
 print(f"  Date range: {tft_train_data['Date'].min()} to {tft_train_data['Date'].max()}")
 # %%
-# Define validation split (last 20% of training data)
-training_cutoff = int(tft_train_data['time_idx'].max() * 0.8)
+# Define validation split (use 90% of training data for model training, 10% for early stopping)
+# This matches the approach used for GBM/XGBoost models
+training_cutoff = int(tft_train_data['time_idx'].max() * 0.9)
 # Time-varying features (change over time)
 time_varying_known_reals = exo_cols  # Exogenous variables
 time_varying_unknown_reals = estimators + ['target']
 
-print(f"Training cutoff: {training_cutoff}")
+print(f"Training cutoff: {training_cutoff} (90% of pre-2023 data for training)")
 print(f"Time-varying known reals: {time_varying_known_reals}")
 print(f"Time-varying unknown reals: {time_varying_unknown_reals}")
 
@@ -2047,7 +1660,7 @@ training_tft = TimeSeriesDataSet(
     add_encoder_length=True,
 )
 
-# Create validation dataset
+# Create validation dataset (10% of pre-2023 data for early stopping during training)
 validation_tft = TimeSeriesDataSet.from_dataset(
     training_tft,
     tft_train_data[tft_train_data['time_idx'] > training_cutoff],
@@ -2055,15 +1668,36 @@ validation_tft = TimeSeriesDataSet.from_dataset(
     stop_randomization=True
 )
 
+print("\n✓ Preparing TRUE TEST SET (2023+) - matching GBM/XGBoost split...")
+# This uses the SAME test set as all ML models for fair comparison
+tft_test_data = prepare_tft_data(
+    vol_data=data['test_x'][estimators],      # 2023+ test data (same as ML models)
+    exo_data=data['test_exo'][exo_cols],      # 2023+ exogenous variables
+    y_true=data['test_y'],                    # 2023+ target variable
+    max_encoder_length=90,
+    max_prediction_length=1
+)
+
+# Create test dataset
+test_tft = TimeSeriesDataSet.from_dataset(
+    training_tft,
+    tft_test_data,
+    predict=True,
+    stop_randomization=True
+)
+
 # Create dataloaders
 batch_size = 16  # Increased for more stable gradients with preprocessed features
 train_dataloader = training_tft.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
 val_dataloader = validation_tft.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
+test_dataloader = test_tft.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
 
-print(f"✓ TFT datasets created")
-print(f"  Training samples: {len(training_tft)}")
-print(f"  Validation samples: {len(validation_tft)}")
+print(f"✓ TFT datasets created (matching GBM/XGBoost split):")
+print(f"  Training samples: {len(training_tft)} (90% of pre-2023 for model training)")
+print(f"  Validation samples: {len(validation_tft)} (10% of pre-2023 for early stopping)")
+print(f"  TEST samples: {len(test_tft)} (2023+ TRUE test set - SAME as ML models)")
 print(f"  Batch size: {batch_size}")
+print(f"\n✓ TFT will be evaluated on SAME test period as GBM/XGBoost/LightGBM/CatBoost!")
 # %%
 # Configure TFT model
 print("\n" + "="*60)
@@ -2171,9 +1805,9 @@ class TFTMetricsCallback(Callback):
                 actual_var_valid = actual_var[valid_mask]
                 
                 if len(pred_var_valid) > 0:
-                    # Calculate metrics
-                    rmse_val = rmse(actual_var_valid, pred_var_valid)
-                    accuracy_val = calculate_directional_accuracy(actual_var_valid, pred_var_valid)
+                    # Calculate metrics (simple RMSE, not rolling window)
+                    rmse_val = np.sqrt(np.mean((actual_var_valid - pred_var_valid) ** 2))
+                    accuracy_val = Metric_Evaluation.calculate_directional_accuracy(actual_var_valid, pred_var_valid)
                     
                     # Log metrics
                     epoch_num = trainer.current_epoch + 1
@@ -2254,13 +1888,17 @@ print("\n✓ TFT model training completed")
 
 
 # %%
-# Generate predictions
-print("\nGenerating TFT predictions on training set...")
-tft_predictions = tft.predict(val_dataloader, mode='prediction', return_x=True)
+# Generate predictions on TRUE TEST SET (2023+) - matching GBM/XGBoost evaluation
+print("\n" + "="*80)
+print("GENERATING TFT PREDICTIONS ON TRUE TEST SET (2023+)")
+print("="*80)
+print("Using SAME test period as GBM/XGBoost/LightGBM/CatBoost for fair comparison")
+
+tft_predictions = tft.predict(test_dataloader, mode='prediction', return_x=True)
 
 # Debug: Check the shape of predictions
 pred_array = tft_predictions.output.detach().cpu().numpy()
-print(f"  Prediction shape: {pred_array.shape}")
+print(f"\n✓ Prediction shape: {pred_array.shape}")
 
 # Extract predictions (handle both single and multiple quantiles)
 if pred_array.ndim == 2 and pred_array.shape[1] == 7:
@@ -2269,6 +1907,7 @@ if pred_array.ndim == 2 and pred_array.shape[1] == 7:
     tft_pred_q10 = pred_array[:, 1]     # 0.1 quantile (lower bound)
     tft_pred_q90 = pred_array[:, 5]     # 0.9 quantile (upper bound)
     print(f"  Using median (0.5 quantile) for evaluation")
+    print(f"  Prediction intervals: [10th percentile, 90th percentile]")
 elif pred_array.ndim == 2 and pred_array.shape[1] == 1:
     # Single output (possibly collapsed quantiles for single-step)
     tft_pred_values = pred_array[:, 0]
@@ -2278,40 +1917,50 @@ elif pred_array.ndim == 2 and pred_array.shape[1] == 1:
 else:
     raise ValueError(f"Unexpected prediction shape: {pred_array.shape}")
 
-print(f"  Extracted {len(tft_pred_values)} predictions")
+print(f"\n✓ Extracted {len(tft_pred_values)} predictions from test set")
 
+# Extract actual values from TEST SET
 tft_actual_values = []
-
-for batch in val_dataloader:
+for batch in test_dataloader:
     tft_actual_values.extend(batch[1][0][:, 0].detach().cpu().numpy())
 
 tft_actual_values = np.array(tft_actual_values)
-print(f"  Extracted {len(tft_actual_values)} actual values")
+print(f"✓ Extracted {len(tft_actual_values)} actual values from test set")
 
 # Create series with proper indices
-# Get the validation dates
-validation_data = tft_train_data[tft_train_data['time_idx'] > training_cutoff].reset_index(drop=True)
-n_samples = min(len(tft_pred_values), len(tft_actual_values), len(validation_data))
+# Get the test dates (2023+)
+n_samples = min(len(tft_pred_values), len(tft_actual_values), len(tft_test_data))
 
-print(f"  Using {n_samples} samples for evaluation")
-print(f"  Validation data length: {len(validation_data)}")
+print(f"\n✓ Using {n_samples} samples for evaluation (2023+ test period)")
+print(f"  Test data length: {len(tft_test_data)}")
 print(f"  Predictions length: {len(tft_pred_values)}")
 print(f"  Actual values length: {len(tft_actual_values)}")
+print(f"  Test period: {tft_test_data['Date'].min()} to {tft_test_data['Date'].max()}")
 
-# Use simple integer index for now to avoid mismatch
+# Use test data dates for proper index (matching GBM/XGBoost)
+test_dates = tft_test_data['Date'].values[:n_samples]
 tft_pred_series = pd.Series(
     tft_pred_values[:n_samples],
-    index=range(n_samples)
+    index=test_dates,
+    name='TFT_predictions_log'
 )
 
 tft_actual_series = pd.Series(
     tft_actual_values[:n_samples],
-    index=range(n_samples)
+    index=test_dates,
+    name='Actual_log'
 )
+
+print(f"\n✓ Created prediction series with date index:")
+print(f"  Index: {tft_pred_series.index.min()} to {tft_pred_series.index.max()}")
 
 # Calculate metrics (convert to variance scale)
 tft_pred_var = np.exp(tft_pred_series)
 tft_actual_var = np.exp(tft_actual_series)
+
+print(f"\n✓ TFT predictions generated on TEST SET (2023+)")
+print(f"  SAME evaluation period as GBM/XGBoost/LightGBM/CatBoost")
+print(f"  Ready for fair comparison!")
 
 # Filter out extreme values that cause MSPE explosion
 # Keep only reasonable variance values (> 1e-8 to avoid division by near-zero)
@@ -2320,19 +1969,23 @@ valid_mask = (tft_actual_var > 1e-8) & (tft_pred_var > 1e-8) & np.isfinite(tft_a
 tft_qlike = Metric_Evaluation.qlike(tft_actual_var[valid_mask], tft_pred_var[valid_mask])
 tft_mspe = Metric_Evaluation.mspe(tft_actual_var[valid_mask], tft_pred_var[valid_mask])
 
-print(f"\n{'='*60}")
-print("TFT MODEL PERFORMANCE (Validation Set)")
-print(f"{'='*60}")
-print(f"QLIKE Mean: {tft_qlike.mean():.4f} ± {tft_qlike.std():.4f}")
-print(f"MSPE Mean:  {tft_mspe.mean():.4f} ± {tft_mspe.std():.4f}")
+print(f"\n{'='*80}")
+print("TFT MODEL PERFORMANCE ON TRUE TEST SET (2023+)")
+print("="*80)
+print(f"✓ Evaluated on SAME test period as GBM/XGBoost/LightGBM/CatBoost")
+print(f"  Test period: {tft_pred_series.index.min()} to {tft_pred_series.index.max()}")
+print(f"  Test samples: {len(tft_pred_series)}")
+print(f"\nMetrics:")
+print(f"  QLIKE Mean: {tft_qlike.mean():.4f} ± {tft_qlike.std():.4f}")
+print(f"  MSPE Mean:  {tft_mspe.mean():.4f} ± {tft_mspe.std():.4f}")
 
-# Calculate and log RMSE and Accuracy
-tft_rmse = rmse(tft_actual_var, tft_pred_var)
-tft_accuracy = calculate_directional_accuracy(tft_actual_var, tft_pred_var)
+# Calculate and log RMSE and Accuracy (simple RMSE, not rolling)
+tft_rmse = np.sqrt(np.mean((tft_actual_var - tft_pred_var) ** 2))
+tft_accuracy = Metric_Evaluation.calculate_directional_accuracy(tft_actual_var, tft_pred_var)
 
-print(f"RMSE:       {tft_rmse:.4f}")
-print(f"Directional Accuracy: {tft_accuracy:.4f} ({tft_accuracy*100:.2f}%)")
-print(f"{'='*60}")
+print(f"  RMSE:       {tft_rmse:.4f}")
+print(f"  Directional Accuracy: {tft_accuracy:.4f} ({tft_accuracy*100:.2f}%)")
+print(f"="*80)
 
 # Add TFT results to report
 add_tft_results_to_report(tft_qlike, tft_mspe, tft_pred_var, tft_actual_var, 
@@ -2341,12 +1994,20 @@ add_tft_results_to_report(tft_qlike, tft_mspe, tft_pred_var, tft_actual_var,
                            tft_pred_q10, tft_pred_q90)
 
 print("\n" + "="*80)
-print("PHASE 5: COMPREHENSIVE MODEL COMPARISON")
+print("✓ TFT EVALUATION COMPLETE")
+print("="*80)
+print("✓ TFT predictions generated on 2023+ test set")
+print("✓ SAME evaluation period as GBM/XGBoost/LightGBM/CatBoost")
+print("✓ Ready for fair comparison - all models evaluated on same test data!")
+print("="*80)
+
+print("\n" + "="*80)
+print("PHASE 7: COMPREHENSIVE MODEL COMPARISON")
 print("="*80)
 
 # Create comprehensive comparison
 create_comprehensive_comparison(
-    ml_evaluation_results, windows, ml_model_types, tft_qlike, tft_mspe, report, plt
+    ml_evaluation_results, windows, ml_model_types, tft_qlike, tft_mspe, tft_rmse, tft_accuracy, report, plt
 )
 
 # %%
@@ -2371,7 +2032,7 @@ print(f"    - CatBoost")
 print(f"  • TFT model trained: ✓")
 print(f"  • TFT QLIKE: {tft_qlike.mean():.6f} ± {tft_qlike.std():.6f}")
 print(f"  • TFT MSPE: {tft_mspe.mean():.6f} ± {tft_mspe.std():.6f}")
-print(f"  • TFT RMSE: {rmse(tft_actual_var, tft_pred_var):.6f}")
+print(f"  • TFT RMSE: {np.sqrt(np.mean((tft_actual_var - tft_pred_var) ** 2)):.6f}")
 print(f"\nReport saved to: {report.report_file}")
 print("="*80)
 

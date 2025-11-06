@@ -18,6 +18,36 @@ class Metric_Evaluation:
     rolling_mean = pd.Series(errors).rolling(window = window).mean()
     return np.sqrt(rolling_mean)
 
+  def calculate_directional_accuracy(y_true, y_pred):
+    """
+    Calculate directional accuracy for volatility forecasting.
+    Measures if predicted volatility trend matches actual trend.
+    
+    Parameters:
+    -----------
+    y_true : array-like
+        Actual values
+    y_pred : array-like
+        Predicted values
+        
+    Returns:
+    --------
+    float : Directional accuracy (0-1)
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    
+    # Calculate changes
+    true_changes = np.diff(y_true)
+    pred_changes = np.diff(y_pred)
+    
+    # Check if direction matches (both positive or both negative)
+    direction_match = np.sign(true_changes) == np.sign(pred_changes)
+    
+    # Calculate accuracy
+    accuracy = np.mean(direction_match)
+    return accuracy
+
   def diebold_mariano_test(y_true, pred1, pred2, h=1, loss_type='MSE'):
     # """
     # Diebold-Mariano test for equal predictive accuracY
