@@ -915,22 +915,47 @@ if __name__ == "__main__":
     print(f"  Training samples: {len(train_x_split)}")
     print(f"  Test samples: {len(test_x_split)}")
     
-    # PHASE 2: TRAIN ML MODELS ONCE ON FULL TRAINING DATA
+    # Define windows (matching stat model)
+    rolling_windows = [252, 756]
+    
+    # PHASE 2: TRAIN ML MODELS ON TRAINING DATA
     print("\n" + "="*80)
-    print("PHASE 2: TRAINING ML MODELS ON FULL TRAINING DATA (NO ROLLING WINDOWS)")
+    print("PHASE 2: TRAINING ML MODELS ON TRAINING DATA WITH ROLLING WINDOWS")
     print("="*80)
-    print("Note: Train once on ALL training data, then predict on test data")
+    print("Note: Models are trained ONLY on training data, then predict on test data")
+    
+    # Train with rolling windows ON TRAINING DATA ONLY
+    ml_results_by_window, ml_training_times, ml_model_types, windows = train_ml_models_rolling_window(
+        full_x=train_x_split,      # Use ONLY training data
+        full_y=train_y_split,      # Use ONLY training targets
+        full_exo=train_exo_split,  # Use ONLY training exogenous variables
+        report=report,
+        windows=rolling_windows,
+        n_jobs=-1,          # Use all CPU cores for parallel training
+        use_gpu=False,      # Disable GPU to avoid parallel conflicts (faster overall)
+        train_every_k=5     # Train every 5 days for 5x speedup
+    )
+    
+    # PHASE 3: GENERATE PREDICTIONS ON TEST DATA
+    print("\n" + "="*80)
+    print("PHASE 3: GENERATING OUT-OF-SAMPLE PREDICTIONS ON TEST DATA")
+    print("="*80)
+    print("Note: Using models trained on training data to predict test data")
+    
+    # For each window and model, we need to:
+    # 1. Train final model on last 'window' days of training data
+    # 2. Use that model to predict on test data one step at a time
+    # 3. Update the rolling window with actual test values as we go
     
     from vol_models.HARModel import HAR_Model
     
     # Configuration
     estimators = ['square_est_log', 'parkinson_est_log', 'gk_est_log', 'rs_est_log']
     exo_cols = ['UST10Y', 'HYOAS', 'TermSpread_10Y_2Y', 'VIX', 'Breakeven10Y']
-    ml_model_types = ['rf', 'gbm', 'xgboost', 'lightgbm', 'catboost']
     model_params = {'n_estimators': 200, 'max_depth': 6, 'learning_rate': 0.05}
     
-    # Build combined feature matrices for train and test with HAR lags
-    print("\nBuilding feature matrices with HAR lags (1, 5, 22)...")
+    # Build combined feature matrices for train and test
+    print("\nBuilding feature matrices for out-of-sample prediction...")
     
     # Training features
     train_features = []
@@ -940,72 +965,11 @@ if __name__ == "__main__":
         x_est = har.features(df_in)
         x_est.columns = [f"{est}_{col}" for col in x_est.columns]
         train_features.append(x_est)
-        print(f"  {est}: {x_est.shape[1]} HAR features")
     train_features.append(train_exo_split[exo_cols])
-    print(f"  Exogenous: {len(exo_cols)} features")
-    
     X_train_combined = pd.concat(train_features, axis=1).dropna()
     y_train_combined = train_y_split.loc[X_train_combined.index]
-
-    # -----------------------------------------------------------------
-    # DIAGNOSTIC: detect potential leakage of the target into training X
-    # -----------------------------------------------------------------
-    print("\n" + "-"*60)
-    print("DIAGNOSTIC: Checking for target leakage into training features")
-    print("-"*60)
-    target_col = 'square_est_log'
-    X = X_train_combined.copy()
-    y = y_train_combined.copy()
-
-    # 1) Feature names containing the target substring
-    leak_by_name = [c for c in X.columns if target_col in c]
-    print(f"Features containing '{target_col}' in name: {leak_by_name}")
-
-    # 2) Exact equality or equality to shifted target (common HAR lags)
-    exact_matches = []
-    shift_matches = []
-    shifts_to_check = [0, 1, 5, 22]
-    for col in X.columns:
-        # align indices
-        col_s = X[col].reindex(y.index)
-        # exact match (within tolerance)
-        try:
-            if np.allclose(col_s.values, y.values, atol=1e-12, equal_nan=True):
-                exact_matches.append(col)
-                continue
-        except Exception:
-            pass
-        # check shifted versions
-        for s in shifts_to_check:
-            try:
-                if np.allclose(col_s.values, y.shift(s).values, atol=1e-12, equal_nan=True):
-                    shift_matches.append((col, s))
-                    break
-            except Exception:
-                continue
-
-    print(f"Columns exactly equal to target: {exact_matches}")
-    print(f"Columns equal to target shifted by common lags: {shift_matches}")
-
-    # 3) High absolute correlation with the target (possible proxy/leak)
-    try:
-        joined = X.join(y.rename('__target__'), how='inner')
-        corrs = joined.corr()['__target__'].drop('__target__').abs().sort_values(ascending=False)
-        print("\nTop 10 absolute correlations with target:")
-        print(corrs.head(10))
-
-        high_corr = corrs[corrs > 0.999]
-        if not high_corr.empty:
-            print("\nWARNING: Features with extremely high correlation (>0.999) detected (possible leakage):")
-            print(high_corr)
-        else:
-            print("\nNo features with abs(corr) > 0.999 found.")
-    except Exception as e:
-        print(f"Could not compute correlations: {e}")
-
-    print("-"*60)
     
-    # Test features
+    # Test features (initially just compute HAR features from test data)
     test_features = []
     for est in estimators:
         df_in = test_x_split[[est]].copy()
@@ -1017,68 +981,47 @@ if __name__ == "__main__":
     X_test_combined = pd.concat(test_features, axis=1).dropna()
     y_test_combined = test_y_split.loc[X_test_combined.index]
     
-    print(f"\n✓ Training features: {X_train_combined.shape}")
+    print(f"✓ Training features: {X_train_combined.shape}")
     print(f"✓ Test features: {X_test_combined.shape}")
-    print(f"✓ Total features per model: {X_train_combined.shape[1]}")
     
-    # PHASE 3: TRAIN MODELS AND GENERATE PREDICTIONS
-    print("\n" + "="*80)
-    print("PHASE 3: TRAINING MODELS AND GENERATING TEST PREDICTIONS")
-    print("="*80)
+    # Now generate predictions for each window and model
+    test_predictions = {w: {} for w in rolling_windows}
     
-    ml_results = {}
-    ml_training_times = {}
+    for w in rolling_windows:
+        print(f"\nWindow {w} days:")
+        for model_name in ml_model_types:
+            print(f"  Generating predictions for {model_name.upper()}...", end=" ")
+            
+            # Initialize ML model
+            ml_model = ML_Volatility_Model(
+                model_type=model_name,
+                model_params=model_params
+            )
+            
+            # Train model on last 'window' days of training data
+            train_window_x = X_train_combined.tail(w)
+            train_window_y = y_train_combined.tail(w)
+            
+            ml_model.model = ml_model._get_model()
+            ml_model.model.fit(train_window_x, train_window_y)
+            
+            # Generate predictions on test data
+            y_pred_log = ml_model.model.predict(X_test_combined)
+            y_pred_log = pd.Series(y_pred_log, index=X_test_combined.index)
+            
+            # Store results
+            test_predictions[w][model_name] = {
+                'predictions': y_pred_log,
+                'residuals': y_pred_log - y_test_combined,
+                'y_true': y_test_combined
+            }
+            
+            print(f"✓ {len(y_pred_log)} predictions")
     
-    for model_idx, model_name in enumerate(ml_model_types, 1):
-        print(f"\n[{model_idx}/{len(ml_model_types)}] {model_name.upper()}")
-        print(f"  Training on {len(X_train_combined)} samples...", end=" ")
-        
-        start_time = time.time()
-        
-        # Initialize ML model
-        ml_model = ML_Volatility_Model(
-            model_type=model_name,
-            model_params=model_params
-        )
-        
-        # Train model on FULL training data
-        ml_model.model = ml_model._get_model()
-        ml_model.model.fit(X_train_combined, y_train_combined)
-        
-        training_time = time.time() - start_time
-        ml_training_times[model_name] = training_time
-        
-        print(f"✓ ({training_time:.2f}s)")
-        print(f"  Predicting on {len(X_test_combined)} test samples...", end=" ")
-        
-        # Generate predictions on test data
-        y_pred_log = ml_model.model.predict(X_test_combined)
-        y_pred_log = pd.Series(y_pred_log, index=X_test_combined.index)
-        
-        # Store results
-        ml_results[model_name] = {
-            'predictions': y_pred_log,
-            'residuals': y_pred_log - y_test_combined,
-            'y_true': y_test_combined
-        }
-        
-        print(f"✓ {len(y_pred_log)} predictions")
+    # Replace ml_results_by_window with test predictions
+    ml_results_by_window = test_predictions
     
-    print("\n" + "="*80)
-    print("✓ ALL MODELS TRAINED AND PREDICTIONS GENERATED")
-    print("="*80)
-    print("\nTraining Time Summary:")
-    for model_name, elapsed in sorted(ml_training_times.items(), key=lambda x: x[1]):
-        print(f"  {model_name:12s}: {elapsed:7.2f}s")
-    total_time = sum(ml_training_times.values())
-    print(f"  {'TOTAL':12s}: {total_time:7.2f}s")
-    print(f"  {'AVERAGE':12s}: {total_time/len(ml_training_times):7.2f}s")
-    print("="*80)
-    
-    # Create a dummy windows list for compatibility with evaluation functions
-    # We'll use a single "window" representing full training data
-    rolling_windows = ['full']
-    ml_results_by_window = {'full': ml_results}
+    print("\n✓ All out-of-sample predictions generated")
     
     # PHASE 4: EVALUATE ML MODELS
     print("\n" + "="*80)
@@ -1096,11 +1039,12 @@ if __name__ == "__main__":
     print("PHASE 5: ADDING ML RESULTS TO REPORT")
     print("="*80)
     
-    # Print summary
-    print(f"\nModel Performance Summary:")
-    for model_name in ml_model_types:
-        res = ml_evaluation_results['full'][model_name]
-        print(f"  {model_name.upper():12s}: QLIKE={res['qlike_mean']:.4f}, MSPE={res['mspe_mean']:.4f}, RMSE={res['rmse']:.4f}, Dir.Acc={res['directional_accuracy']*100:.2f}%")
+    # Print summary for each window
+    for w in rolling_windows:
+        print(f"\nWindow {w} days:")
+        for model_name in ml_model_types:
+            res = ml_evaluation_results[w][model_name]
+            print(f"  {model_name.upper():12s}: QLIKE={res['qlike_mean']:.4f}, MSPE={res['mspe_mean']:.4f}, RMSE={res['rmse']:.4f}, Predictions={len(res['y_pred_var'])}")
     
     # Add comprehensive ML results to report using our new function
     add_ml_results_to_report(
@@ -1111,7 +1055,7 @@ if __name__ == "__main__":
         plt=plt
     )
     
-    print("\n✓ ML models analysis complete!")
+    print("\n✓ ML models analysis complete with rolling windows!")
     
     # =============================================================================
     # Save ML Predictions to CSV
@@ -1120,17 +1064,19 @@ if __name__ == "__main__":
     print("SAVING ML PREDICTIONS TO CSV")
     print("="*80)
 
-    # Save individual CSV files for each model
+    # Save individual CSV files for each model (using the largest window for consistency)
+    best_window = max(rolling_windows)  # Use largest window (756 days)
+    
     for model_name in ml_model_types:
         # Get predictions for this model
-        results = ml_evaluation_results['full'][model_name]
+        results = ml_evaluation_results[best_window][model_name]
         y_true_var = results['y_true_var']
         y_pred_var = results['y_pred_var']
         
         # Create DataFrame similar to TFT format
         model_predictions_df = pd.DataFrame({
             'RV_true': y_true_var,
-            f'ML_{model_name}': y_pred_var
+            f'ML_{model_name}_w{best_window}': y_pred_var
         })
         
         # Save to individual CSV file
@@ -1138,22 +1084,24 @@ if __name__ == "__main__":
         model_predictions_df.to_csv(filename, index_label='Date')
         print(f"✓ Saved {filename} ({len(model_predictions_df)} predictions)")
 
-    # Also save the combined CSV
-    y_true_var = ml_evaluation_results['full'][ml_model_types[0]]['y_true_var']
+    # Also save the combined CSV for backward compatibility
+    # Get the true values (they are the same for all models in the test set)
+    y_true_var = ml_evaluation_results[rolling_windows[0]][ml_model_types[0]]['y_true_var']
     
     # Start DataFrame with true values
     ml_predictions_df = pd.DataFrame({'RV_true': y_true_var})
 
-    # Add predictions from each model
-    for model_name in ml_model_types:
-        # Get the predictions for the current model
-        y_pred_var = ml_evaluation_results['full'][model_name]['y_pred_var']
-        
-        # Define a clear column name
-        col_name = f"ML_{model_name}"
-        
-        # Join the predictions to the main DataFrame
-        ml_predictions_df = ml_predictions_df.join(y_pred_var.rename(col_name), how='outer')
+    # Add predictions from each model and window
+    for w in rolling_windows:
+        for model_name in ml_model_types:
+            # Get the predictions for the current model and window
+            y_pred_var = ml_evaluation_results[w][model_name]['y_pred_var']
+            
+            # Define a clear column name
+            col_name = f"ML_{model_name}_w{w}"
+            
+            # Join the predictions to the main DataFrame
+            ml_predictions_df = ml_predictions_df.join(y_pred_var.rename(col_name), how='outer')
 
     # Save to CSV
     ml_predictions_df.to_csv('ml_predictions.csv', index_label='Date')
@@ -1173,10 +1121,9 @@ if __name__ == "__main__":
     print("="*80)
     print("\nSummary:")
     print(f"  • Trained {len(ml_model_types)} ML models")
-    print(f"  • Training approach: Train once on full training data")
-    print(f"  • Training samples: {len(X_train_combined)}")
-    print(f"  • Test predictions: {len(y_test_combined)} days")
-    print(f"  • Total training time: {sum(ml_training_times.values()):.2f}s")
+    print(f"  • Evaluated on {len(rolling_windows)} window sizes")
+    print(f"  • Total combinations: {len(ml_model_types) * len(rolling_windows)}")
+    print(f"  • Test period predictions: {len(test_x_split)} days")
     print(f"  • Report saved to: {report.report_file}")
     print("="*80)
 

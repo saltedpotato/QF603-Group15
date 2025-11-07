@@ -10,9 +10,9 @@ class HAR_Model:
   def features(self, df):
     y_pred = df[self.y_log_col]
     out = pd.DataFrame(index=df.index)
-    out['rv_d'] = y_pred
-    out['rv_w'] = y_pred.rolling(self.lags[1], min_periods = self.lags[1]).mean()
-    out['rv_m'] = y_pred.rolling(self.lags[2], min_periods = self.lags[2]).mean()
+    out['rv_d'] = y_pred.shift(1)  # lag 1 (previous day)
+    out['rv_w'] = y_pred.shift(1).rolling(5, min_periods=5).mean()  # average of lags 1-5
+    out['rv_m'] = y_pred.shift(1).rolling(22, min_periods=22).mean()  # average of lags 1-22
 
     if self.exo_col:
       for col in self.exo_col:

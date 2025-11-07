@@ -36,20 +36,18 @@ def plot_predictions_dashboard():
             print(f"  ✗ WARNING: {filename} not found. Skipping.")
             data[key] = None
 
-    # Load individual ML model prediction files
-    ml_model_types = ['rf', 'gbm', 'xgboost', 'lightgbm', 'catboost']
-    ml_data = {}
-    for model_name in ml_model_types:
-        filename = f'ml_{model_name}_predictions.csv'
-        if os.path.exists(filename):
-            print(f"  ✓ Loading {filename}...")
-            df = pd.read_csv(filename, index_col='Date', parse_dates=True)
-            # Filter to test set dates (2023 onwards)
-            df = df[df.index >= '2023-01-01']
-            ml_data[model_name] = df
-        else:
-            print(f"  ✗ WARNING: {filename} not found. Skipping.")
-            ml_data[model_name] = None
+    
+    # Load combined ML predictions file
+    ml_combined_file = 'ml_predictions.csv'
+    ml_combined_data = None
+    if os.path.exists(ml_combined_file):
+        print(f"  ✓ Loading {ml_combined_file}...")
+        ml_combined_data = pd.read_csv(ml_combined_file, index_col='Date', parse_dates=True)
+        # Filter to test set dates (2023 onwards)
+        ml_combined_data = ml_combined_data[ml_combined_data.index >= '2023-01-01']
+    else:
+        print(f"  ✗ WARNING: {ml_combined_file} not found. Skipping.")
+        ml_combined_data = None
 
     # Load all TFT prediction files
     tft_files = glob.glob('tft_predictions_*.csv')
@@ -74,20 +72,21 @@ def plot_predictions_dashboard():
     # --- 3. Add True Volatility Trace ---
     # Find the true volatility column (could have different names)
     y_true = None
-    if data.get('har') is not None and 'RV_squared_return' in data['har'].columns:
+    if ml_combined_data is not None and 'RV_true' in ml_combined_data.columns:
+        y_true = ml_combined_data['RV_true'].dropna()
+        true_col_name = 'RV_true'
+        print(f"  ✓ Using RV_true from {ml_combined_file}.")
+    elif data.get('har') is not None and 'RV_squared_return' in data['har'].columns:
         y_true = data['har']['RV_squared_return'].dropna()
         true_col_name = 'RV_squared_return'
-    elif ml_data and any('RV_true' in df.columns for df in ml_data.values() if df is not None):
-        # Use RV_true from ML files
-        y_true = next(df['RV_true'].dropna() for df in ml_data.values() if df is not None and 'RV_true' in df.columns)
-        true_col_name = 'RV_true (from ML)'
+        print(f"  ✓ Using RV_squared_return from HAR file.")
     
     if y_true is not None:
         fig.add_trace(go.Scatter(
             x=y_true.index,
             y=y_true,
             mode='lines',
-            name='True RV (Squared Return)',
+            name='True RV',
             line=dict(color='black', width=2.5),
             visible=True  # Always visible
         ))
@@ -153,22 +152,41 @@ def plot_predictions_dashboard():
         'lightgbm': 'LightGBM',
         'catboost': 'CatBoost'
     }
+    ml_model_types = ['rf', 'gbm', 'xgboost', 'lightgbm', 'catboost']
     
-    for i, (model_key, df) in enumerate(ml_data.items()):
-        if df is not None:
-            col_name = f'ML_{model_key}_w756'  # Using w756 as we saved with best_window
-            if col_name in df.columns:
+    # Use combined data if available, otherwise fall back to individual files
+    if ml_combined_data is not None:
+        for i, model_key in enumerate(ml_model_types):
+            col_name = f'ML_{model_key}'
+            if col_name in ml_combined_data.columns:
                 color = ml_colors[i % len(ml_colors)]
                 model_display_name = ml_model_names.get(model_key, model_key.upper())
                 fig.add_trace(go.Scatter(
-                    x=df.index,
-                    y=df[col_name],
+                    x=ml_combined_data.index,
+                    y=ml_combined_data[col_name],
                     mode='lines',
                     name=f'{model_display_name}',
                     line=dict(color=color, width=1.5, dash='solid'),
                     visible=True
                 ))
                 print(f"  ✓ Added {model_display_name} trace.")
+    else:
+        # Fallback to individual ML data files
+        for i, (model_key, df) in enumerate(ml_data.items()):
+            if df is not None:
+                col_name = f'ML_{model_key}'
+                if col_name in df.columns:
+                    color = ml_colors[i % len(ml_colors)]
+                    model_display_name = ml_model_names.get(model_key, model_key.upper())
+                    fig.add_trace(go.Scatter(
+                        x=df.index,
+                        y=df[col_name],
+                        mode='lines',
+                        name=f'{model_display_name}',
+                        line=dict(color=color, width=1.5, dash='solid'),
+                        visible=True
+                    ))
+                    print(f"  ✓ Added {model_display_name} trace.")
 
     # Add TFT epoch predictions
     tft_colors = ['darkorange', 'orange', 'gold', 'yellow', 'lightyellow']
