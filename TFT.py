@@ -49,6 +49,88 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # %%
+# Custom Weighted Quantile Loss for TFT
+# This allows us to penalize underpredictions more heavily for risk management
+import torch
+from pytorch_forecasting.metrics import QuantileLoss
+
+class WeightedQuantileLoss(QuantileLoss):
+    """
+    Quantile loss with custom weights for each quantile.
+    Inherits from pytorch_forecasting's QuantileLoss to ensure compatibility.
+    
+    Higher weights = more influence on training.
+    
+    For volatility forecasting, we prioritize higher quantiles (0.75, 0.9, 0.95)
+    to be more conservative and avoid underpredicting risk.
+    
+    Parameters:
+    -----------
+    quantiles : list of float
+        Quantile levels to predict (e.g., [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95])
+    quantile_weights : list of float
+        Weights for each quantile. Higher weights prioritize that quantile.
+        Example: [0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0] heavily penalizes underpredictions
+    """
+    
+    def __init__(self, quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95], 
+                 quantile_weights=[0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0]):
+        # Initialize parent QuantileLoss
+        super().__init__(quantiles=quantiles)
+        
+        # Register weights as a buffer so they automatically move with the model to GPU/CPU
+        self.register_buffer('quantile_weights', torch.tensor(quantile_weights, dtype=torch.float32))
+        
+    def loss(self, y_pred, y_true):
+        """
+        Calculate weighted quantile loss.
+        
+        Parameters:
+        -----------
+        y_pred : torch.Tensor
+            Predicted quantiles, shape [batch_size, n_quantiles] or [..., n_quantiles]
+        y_true : torch.Tensor
+            Actual values (will be broadcast to match predictions)
+        
+        Returns:
+        --------
+        loss : torch.Tensor
+            Weighted quantile loss per sample
+        """
+        # Get the standard quantile loss per quantile
+        # Shape: [..., n_quantiles]
+        losses = []
+        
+        # quantile_weights is a buffer, so it's already on the correct device
+        weights = self.quantile_weights
+        
+        # Ensure y_true has the right shape for broadcasting
+        if y_true.ndim < y_pred.ndim:
+            # Add dimensions to match y_pred shape
+            for _ in range(y_pred.ndim - y_true.ndim):
+                y_true = y_true.unsqueeze(-1)
+        
+        for i, (q, w) in enumerate(zip(self.quantiles, weights)):
+            pred = y_pred[..., i]
+            actual = y_true[..., 0] if y_true.shape[-1] == 1 else y_true
+            
+            error = actual - pred
+            
+            # Standard quantile loss components
+            loss_over = (1 - q) * torch.clamp(-error, min=0)  # Overprediction penalty
+            loss_under = q * torch.clamp(error, min=0)        # Underprediction penalty
+            
+            # Apply quantile-specific weight
+            loss = (loss_over + loss_under) * w
+            losses.append(loss)
+        
+        # Stack and return mean across quantiles
+        # Shape: [batch_size] or original shape without quantile dimension
+        return torch.stack(losses, dim=-1).mean(dim=-1)
+
+print("✓ WeightedQuantileLoss class defined")
+
+# %%
 # Import volatility models from vol_models package
 from vol_models.VolatilityReportGenerator import VolatilityReportGenerator
 from vol_models.VolatilityEstimator import volatility_estimator
@@ -663,13 +745,33 @@ tft_test_data = prepare_tft_data(
     max_prediction_length=1
 )
 
-# Create test dataset
-test_tft = TimeSeriesDataSet.from_dataset(
-    training_tft,
+# Create test dataset - CRITICAL: Use different approach for predictions
+# When predict=True, TimeSeriesDataSet.from_dataset treats each row as a separate prediction
+# This causes very few samples when max_encoder_length is large relative to data size
+
+# Instead, create test dataset directly with looser constraints for predictions
+print(f"\n✓ Creating test dataset (critical fix for prediction generation)...")
+
+# Use MUCH lower encoder constraints for test prediction phase
+# The model was trained with max_encoder=90, but for predictions we can be more flexible
+test_tft = TimeSeriesDataSet(
     tft_test_data,
-    predict=True,
-    stop_randomization=True
+    time_idx='time_idx',
+    target='target',
+    group_ids=['group'],
+    min_encoder_length=1,  # REDUCED: Minimum encoder length for predictions
+    max_encoder_length=90,  # Keep max to match training, but flexibility at prediction time
+    min_prediction_length=1,
+    max_prediction_length=1,
+    time_varying_known_reals=exo_cols,
+    time_varying_unknown_reals=estimators + ['target'],
+    target_normalizer=training_tft.target_normalizer,  # Use training normalizer
+    add_relative_time_idx=True,
+    add_target_scales=True,
+    add_encoder_length=True,
 )
+
+print(f"✓ Direct test dataset creation: {len(test_tft)} samples")
 
 # Create dataloaders
 batch_size = 64  # Increased for more stable gradients with preprocessed features
@@ -698,7 +800,8 @@ tft = TemporalFusionTransformer.from_dataset(
     hidden_continuous_size=64,  # DOUBLED: More processing capacity for continuous features
     lstm_layers=2,       # Add second LSTM layer for deeper temporal modeling
     output_size=7,       # Multiple quantiles (keeping as requested)
-    loss=QuantileLoss(quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]),
+    loss=WeightedQuantileLoss(quantiles=[0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95], 
+                              quantile_weights=[0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0]),  # RE-ENABLED: Weighted loss for conservative predictions
     log_interval=5,
     reduce_on_plateau_patience=4,
 )
@@ -710,8 +813,9 @@ print(f"  LSTM layers: 2 (deeper temporal modeling)")
 print(f"  Attention heads: 4 (multi-head attention)")
 print(f"  Dropout: 0.2 (regularization for larger model)")
 print(f"  Learning rate: 0.001")
+print(f"  Loss: WeightedQuantileLoss (penalizes underpredictions for conservative forecasts)")
 print(f"  Loss quantiles: {tft.loss.quantiles}")
-print(f"  Output: Multiple quantiles (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)")
+print(f"  Quantile weights: {tft.loss.quantile_weights.tolist()} (higher = more conservative)")
 print(f"  Estimated parameters: ~150K+ (vs ~40K in baseline model)")
 
 # Custom PyTorch Lightning Callback for logging RMSE and Accuracy
@@ -810,17 +914,196 @@ class TFTMetricsCallback(Callback):
                 pl_module.train()  # Make sure model is back in training mode
                 pass
 
+# %%
+# Function to save TFT predictions at each epoch
+def save_tft_epoch_predictions(tft_model, test_dataloader, tft_test_data, epoch_num):
+    """
+    Generate TFT predictions on test set and save to CSV with epoch number.
+    
+    Parameters:
+    -----------
+    tft_model : TemporalFusionTransformer
+        Trained TFT model
+    test_dataloader : DataLoader
+        Test data loader
+    tft_test_data : pd.DataFrame
+        Raw test data with dates
+    epoch_num : int
+        Current epoch number (used for filename)
+    
+    Returns:
+    --------
+    None (saves CSV file)
+    """
+    import torch
+    from torch.utils.data import DataLoader
+    
+    print(f"\n[EPOCH {epoch_num}] Saving predictions...")
+    
+    try:
+        # Set model to eval mode and ensure it stays on the correct device
+        tft_model.eval()
+        device = next(tft_model.parameters()).device
+        
+        # Get predictions using TFT's predict method
+        with torch.no_grad():
+            raw_predictions = tft_model.predict(test_dataloader, mode="raw", return_x=True)
+        
+        # Extract prediction tensor - handle different output structures
+        if hasattr(raw_predictions, 'output'):
+            # Newer pytorch-forecasting structure
+            if isinstance(raw_predictions.output, dict):
+                prediction_tensor = raw_predictions.output['prediction']
+            else:
+                prediction_tensor = raw_predictions.output
+        else:
+            # Older structure - raw_predictions IS the output
+            if isinstance(raw_predictions, dict):
+                prediction_tensor = raw_predictions['prediction']
+            else:
+                prediction_tensor = raw_predictions
+        
+        # Convert to regular tensor if it's a special pytorch-forecasting object
+        if hasattr(prediction_tensor, 'detach'):
+            prediction_tensor = prediction_tensor.detach()
+        elif not isinstance(prediction_tensor, torch.Tensor):
+            # It might be a tuple or list - try to extract the actual tensor
+            if isinstance(prediction_tensor, (tuple, list)):
+                prediction_tensor = prediction_tensor[0]
+            # Convert to tensor if needed
+            if not isinstance(prediction_tensor, torch.Tensor):
+                prediction_tensor = torch.tensor(prediction_tensor)
+        
+        # Extract median predictions (index 3 for [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95])
+        # Use indexing compatible with both regular tensors and special objects
+        if prediction_tensor.ndim == 3:
+            # Shape: [batch, time, quantiles]
+            tft_pred_log_values = prediction_tensor[:, 0, 3].cpu().numpy()
+        elif prediction_tensor.ndim == 2:
+            # Shape: [batch, quantiles]
+            tft_pred_log_values = prediction_tensor[:, 3].cpu().numpy()
+        else:
+            raise ValueError(f"Unexpected prediction tensor shape: {prediction_tensor.shape}")
+        
+        # Get actual values from test dataset
+        tft_actual_log_values = []
+        for i in range(len(test_dataloader.dataset)):
+            x, y = test_dataloader.dataset[i]
+            if torch.is_tensor(y):
+                actual_val = y[0].item() if y.dim() > 0 else y.item()
+            else:
+                actual_val = float(y[0]) if isinstance(y, (list, tuple, np.ndarray)) else float(y)
+            tft_actual_log_values.append(actual_val)
+        
+        tft_actual_log_values = np.array(tft_actual_log_values)
+        
+        # Align lengths
+        min_length = min(len(tft_pred_log_values), len(tft_actual_log_values))
+        tft_pred_log_values = tft_pred_log_values[:min_length]
+        tft_actual_log_values = tft_actual_log_values[:min_length]
+        
+        # Filter to TRUE TEST PERIOD (2023+)
+        split_date = pd.Timestamp('2023-01-01')
+        all_test_dates = tft_test_data['Date'].values
+        test_period_mask = pd.to_datetime(all_test_dates) >= split_date
+        test_dates_2023plus = all_test_dates[test_period_mask]
+        
+        # Take last N predictions matching test period
+        if len(tft_pred_log_values) >= len(test_dates_2023plus):
+            tft_pred_values_test = tft_pred_log_values[-len(test_dates_2023plus):]
+            tft_actual_values_test = tft_actual_log_values[-len(test_dates_2023plus):]
+            test_dates_filtered = test_dates_2023plus
+        else:
+            tft_pred_values_test = tft_pred_log_values
+            tft_actual_values_test = tft_actual_log_values
+            test_dates_filtered = test_dates_2023plus[-len(tft_pred_log_values):]
+        
+        # Create series with date indices
+        tft_pred_series = pd.Series(
+            tft_pred_values_test,
+            index=pd.to_datetime(test_dates_filtered),
+            name='TFT_predictions_log'
+        )
+        
+        tft_actual_series = pd.Series(
+            tft_actual_values_test,
+            index=pd.to_datetime(test_dates_filtered),
+            name='Actual_log'
+        )
+        
+        # Convert to variance scale
+        tft_pred_var = np.exp(tft_pred_series)
+        tft_actual_var = np.exp(tft_actual_series)
+        
+        # Create DataFrame and save
+        tft_predictions_df = pd.DataFrame({
+            'RV_true': tft_actual_var.values,
+            'TFT_prediction': tft_pred_var.values
+        }, index=tft_pred_var.index)
+        
+        # Save with epoch number in filename
+        filename = f'tft_predictions_{epoch_num}.csv'
+        tft_predictions_df.to_csv(filename, index_label='Date')
+        
+        print(f"  ✓ Saved {filename} ({len(tft_predictions_df)} predictions)")
+        
+    except Exception as e:
+        print(f"  ✗ Error saving predictions at epoch {epoch_num}: {str(e)}")
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        # ALWAYS set model back to training mode on correct device
+        tft_model.train()
+        # Ensure model is on the correct device (GPU if available)
+        if torch.cuda.is_available():
+            tft_model = tft_model.cuda()
+
+
+# Custom callback to save predictions every 3 epochs
+class EpochPredictionCallback(Callback):
+    """Save TFT predictions every 3 epochs during training."""
+    
+    def __init__(self, tft_model, test_dataloader, tft_test_data, save_every_n_epochs=3):
+        super().__init__()
+        self.tft_model = tft_model
+        self.test_dataloader = test_dataloader
+        self.tft_test_data = tft_test_data
+        self.save_every_n_epochs = save_every_n_epochs
+        
+    def on_train_epoch_end(self, trainer, pl_module):
+        """Called when a training epoch ends."""
+        current_epoch = trainer.current_epoch + 1  # Current epoch (1-indexed)
+        
+        # Save predictions every N epochs
+        if current_epoch % self.save_every_n_epochs == 0:
+            save_tft_epoch_predictions(
+                self.tft_model,
+                self.test_dataloader,
+                self.tft_test_data,
+                current_epoch
+            )
+
+# Import Callback base class for custom callback
+try:
+    from lightning.pytorch.callbacks import Callback
+except ImportError:
+    from pytorch_lightning.callbacks import Callback
+
 # Configure trainer
 early_stop_callback = EarlyStopping(
     monitor='val_loss',
     min_delta=1e-4,
-    patience=2,
+    patience=12,
     verbose=False,
     mode='min'
 )
 
 # Create metrics callback
 metrics_callback = TFTMetricsCallback(val_dataloader, None, log_every_n_epochs=1)  # Will set model after instantiation
+
+# Initialize callbacks list
+trainer_callbacks = [early_stop_callback, metrics_callback]
 
 # %%
 trainer = Trainer(
@@ -829,7 +1112,7 @@ trainer = Trainer(
     devices=1,  # Use single GPU
     enable_model_summary=True,
     gradient_clip_val=0.1,
-    callbacks=[early_stop_callback, metrics_callback],
+    callbacks=trainer_callbacks,
     enable_progress_bar=True,
     enable_checkpointing=False,
     logger=False,
@@ -852,7 +1135,7 @@ for i, col in enumerate(predictors.columns):
     axes[i].grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.show()
+# plt.show()
 print("✓ Trainer configured")
 print(f"  Device: {'GPU (CUDA)' if torch.cuda.is_available() else 'CPU'}")
 print("  Max epochs: 500")
@@ -862,16 +1145,100 @@ print("  Live metrics logging: RMSE and Directional Accuracy (every epoch)")
 # Train model with live metric logging
 print("\nTraining TFT model...")
 
+# Initialize epoch prediction callback NOW that TFT model is created
+epoch_prediction_callback = EpochPredictionCallback(
+    tft_model=tft,
+    test_dataloader=test_dataloader,
+    tft_test_data=tft_test_data,
+    save_every_n_epochs=3
+)
+trainer.callbacks.append(epoch_prediction_callback)
+
+print("\n✓ Epoch prediction callback initialized (saves every 3 epochs)")
+
+# Override training_step to ensure proper loss return format for PyTorch Lightning
+def custom_training_step(self, batch, batch_idx):
+    """Custom training_step that ensures proper loss format for PyTorch Lightning."""
+    x, y = batch
+    output = self(x)
+    
+    # Extract prediction tensor from Output object
+    if hasattr(output, 'prediction'):
+        y_hat = output.prediction
+    else:
+        y_hat = output
+    
+    # Handle different y formats from TimeSeriesDataSet
+    if isinstance(y, tuple):
+        # y is (target, target_scale) tuple
+        target, target_scale = y
+        if target_scale is not None:
+            y_hat = self.transform_output(y_hat, target_scale=target_scale)
+        loss = self.loss(y_hat, target)
+    else:
+        # y is a tensor - use original logic
+        try:
+            y_hat = self.transform_output(y_hat, target_scale=y[..., 1:])
+            loss = self.loss(y_hat, y[..., 0])
+        except (IndexError, TypeError):
+            # Fallback: assume y is just the target
+            loss = self.loss(y_hat, y)
+    
+    # Log loss
+    self.log("train_loss", loss, prog_bar=True)
+    
+    # Return loss in format expected by PyTorch Lightning
+    return {"loss": loss}
+
+# Monkey patch the training_step method
+tft.training_step = custom_training_step.__get__(tft, tft.__class__)
+
+print("✓ Custom training_step method applied to ensure proper loss format")
+
 # Train with PyTorch Lightning
 print("\nStarting TFT training with live progress tracking...")
 print("Progress bar will show validation loss each epoch")
-print("Metrics callback will log RMSE and Directional Accuracy\n")
+print("Metrics callback will log RMSE and Directional Accuracy")
+print("Prediction callback will save predictions every 3 epochs\n")
 
 trainer.fit(
     tft,
     train_dataloaders=train_dataloader,
     val_dataloaders=val_dataloader,
 )
+
+# After training, calculate residual variance from the validation set
+print("\nCalculating residual variance from validation set for log-normal correction...")
+# Use the model's predict method with mode="raw" to get detailed outputs
+val_raw_predictions = tft.predict(val_dataloader, mode="raw", return_x=True)
+
+# Extract predictions and actuals from the raw output
+val_pred_tensor = val_raw_predictions.output['prediction']
+# Shape: [n_samples, n_timesteps, n_quantiles]
+# We want timestep=0, quantile index 3 (median)
+val_preds_log = val_pred_tensor[:, 0, 3].cpu().numpy()
+
+# Extract actual values from validation dataset
+val_actuals_log = []
+for i in range(len(validation_tft)):
+    x, y = validation_tft[i]
+    if torch.is_tensor(y):
+        actual_val = y[0].item() if y.dim() > 0 else y.item()
+    else:
+        actual_val = float(y[0]) if isinstance(y, (list, tuple, np.ndarray)) else float(y)
+    val_actuals_log.append(actual_val)
+
+val_actuals_log = np.array(val_actuals_log)
+
+# Align lengths
+min_val_length = min(len(val_preds_log), len(val_actuals_log))
+val_preds_log = val_preds_log[:min_val_length]
+val_actuals_log = val_actuals_log[:min_val_length]
+
+# Calculate residuals and variance
+log_residuals = val_preds_log - val_actuals_log
+residual_variance = np.var(log_residuals)
+print(f"✓ Calculated residual variance for correction: {residual_variance:.4f}")
 
 print("\n✓ TFT model training completed")
 
@@ -883,154 +1250,107 @@ print("GENERATING TFT PREDICTIONS ON TRUE TEST SET (2023+)")
 print("="*80)
 print("Using SAME test period as GBM/XGBoost/LightGBM/CatBoost for fair comparison")
 
-# Set model to evaluation mode
-tft.eval()
+# Use the PROPER pytorch-forecasting API for batch prediction
+print("\nUsing TFT.predict() method for efficient batch inference...")
 
-# Initialize lists to collect all predictions and true values
-tft_pred_values_all = []
-tft_pred_q10_all = []
-tft_pred_q90_all = []
-tft_actual_values = []
+# Create dataloader for prediction (use all samples, no shuffling)
+test_dataloader = test_tft.to_dataloader(train=False, batch_size=128, num_workers=0, shuffle=False)
 
-print("\nIterating through test dataloader to collect all predictions...")
-with torch.no_grad():
-    for batch_idx, batch in enumerate(test_dataloader):
-        x, y = batch
-        
-        # Move to same device as model if needed
-        if hasattr(tft, 'device'):
-            device = tft.device
-            x = {k: v.to(device) if torch.is_tensor(v) else v for k, v in x.items()}
-        
-        # Get predictions for this batch
-        output = tft(x)
-        
-        # Extract prediction tensor
-        if hasattr(output, 'prediction'):
-            preds = output.prediction
-        else:
-            preds = output
-        
-        # Move to CPU and convert to numpy
-        preds_np = preds.detach().cpu().numpy()
-        
-        # Handle different output shapes
-        if preds_np.ndim == 3:  # [batch, time, quantiles]
-            # Take first timestep for each sample in batch
-            preds_batch = preds_np[:, 0, :]
-        elif preds_np.ndim == 2:
-            preds_batch = preds_np
-        else:
-            preds_batch = preds_np.reshape(-1, preds_np.shape[-1])
-        
-        # Extract quantiles if available
-        if preds_batch.shape[1] == 7:
-            # Multiple quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
-            tft_pred_values_all.extend(preds_batch[:, 3])  # Median (0.5 quantile)
-            tft_pred_q10_all.extend(preds_batch[:, 1])     # 0.1 quantile
-            tft_pred_q90_all.extend(preds_batch[:, 5])     # 0.9 quantile
-        elif preds_batch.shape[1] == 1:
-            # Single output
-            tft_pred_values_all.extend(preds_batch[:, 0])
-            tft_pred_q10_all.extend([None] * len(preds_batch))
-            tft_pred_q90_all.extend([None] * len(preds_batch))
-        else:
-            # Take first column as prediction
-            tft_pred_values_all.extend(preds_batch[:, 0])
-            tft_pred_q10_all.extend([None] * len(preds_batch))
-            tft_pred_q90_all.extend([None] * len(preds_batch))
-        
-        # Extract actual values
-        if isinstance(y, tuple):
-            actuals = y[0][:, 0]  # Get first timestep
-        else:
-            actuals = y[:, 0] if y.ndim > 1 else y
-        
-        tft_actual_values.extend(actuals.detach().cpu().numpy())
-        
-        if (batch_idx + 1) % 10 == 0:
-            print(f"  Processed {batch_idx + 1} batches...")
+# Generate predictions using the model's predict method
+raw_predictions = tft.predict(test_dataloader, mode="raw", return_x=True)
 
-# Convert to numpy arrays
-tft_pred_values = np.array(tft_pred_values_all)
-tft_pred_q10 = np.array(tft_pred_q10_all) if tft_pred_q10_all[0] is not None else None
-tft_pred_q90 = np.array(tft_pred_q90_all) if tft_pred_q90_all[0] is not None else None
+print(f"✓ Raw predictions generated")
 
-tft_actual_values = np.array(tft_actual_values)
+# The output is a dictionary-like object with 'prediction' key containing the tensor
+prediction_tensor = raw_predictions.output['prediction']
+print(f"  Prediction tensor shape: {prediction_tensor.shape}")
+print(f"  Output has {len(prediction_tensor)} predictions")
 
-print(f"\n✓ Collected predictions from all batches:")
-print(f"  Total predictions: {len(tft_pred_values)}")
-print(f"  Total actual values: {len(tft_actual_values)}")
-if tft_pred_q10 is not None:
-    print(f"  Prediction intervals available: Yes (10th and 90th percentiles)")
-else:
-    print(f"  Prediction intervals available: No")
+# Extract predictions (in log scale since model was trained on log-transformed targets)
+# prediction_tensor shape: [n_samples, n_timesteps, n_quantiles]
+# We want timestep=0 (one-step ahead)
+# 
+# QUANTILE INDEX MAPPING (with weighted loss):
+# [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+# Weights: [0.5, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0]
+# 
+# Index 3 = 0.5 quantile (median) - balanced, weight=1.5
+# Index 4 = 0.75 quantile - conservative, weight=2.0
+# Index 5 = 0.9 quantile - very conservative, weight=3.0
+# Index 6 = 0.95 quantile - extremely conservative, weight=4.0
+#
+# For risk management, consider using index 4 (0.75) or 5 (0.9) instead of median
+tft_pred_log_values = prediction_tensor[:, 0, 3].cpu().numpy()  # Median predictions (log scale)
+tft_pred_q10_log = prediction_tensor[:, 0, 1].cpu().numpy()  # 0.1 quantile
+tft_pred_q90_log = prediction_tensor[:, 0, 5].cpu().numpy()  # 0.9 quantile
 
-# CRITICAL: Filter out encoder context and keep only TRUE TEST PERIOD predictions
-# The augmented test data has 90 days of training data prepended for encoder context
-# We need to skip those first 90 predictions and only use predictions from 2023+
-encoder_length = 90
+# Get actual values from the test dataset
+print(f"\nExtracting actual values from test dataset...")
+tft_actual_log_values = []
+
+for i in range(len(test_tft)):
+    x, y = test_tft[i]
+    # y is the target value (already in log scale from the dataset)
+    if torch.is_tensor(y):
+        actual_val = y[0].item() if y.dim() > 0 else y.item()
+    else:
+        actual_val = float(y[0]) if isinstance(y, (list, tuple, np.ndarray)) else float(y)
+    tft_actual_log_values.append(actual_val)
+
+tft_actual_log_values = np.array(tft_actual_log_values)
+
+print(f"✓ Collected {len(tft_pred_log_values)} predictions")
+print(f"✓ Collected {len(tft_actual_log_values)} actual values")
+
+# Align lengths (predictions may be fewer due to TimeSeriesDataSet windowing)
+min_length = min(len(tft_pred_log_values), len(tft_actual_log_values))
+tft_pred_values = tft_pred_log_values[:min_length]
+tft_pred_q10 = tft_pred_q10_log[:min_length]
+tft_pred_q90 = tft_pred_q90_log[:min_length]
+tft_actual_values = tft_actual_log_values[:min_length]
+
+print(f"✓ Aligned to {min_length} samples")
+print(f"  Prediction intervals available: Yes (10th and 90th percentiles)")
+
+# Filter to TRUE TEST PERIOD (2023+) only
 split_date = pd.Timestamp('2023-01-01')
 
 print(f"\n✓ Filtering predictions to TRUE TEST PERIOD (2023+):")
 print(f"  Total predictions collected: {len(tft_pred_values)}")
 print(f"  Total actual values: {len(tft_actual_values)}")
-print(f"  Encoder context samples (to skip): {encoder_length}")
-
-# Debug: Check what we have
-print(f"\nDEBUG INFO:")
-print(f"  tft_pred_values shape: {tft_pred_values.shape}")
-print(f"  tft_actual_values shape: {tft_actual_values.shape}")
-print(f"  tft_test_data shape: {tft_test_data.shape}")
-print(f"  tft_test_data columns: {tft_test_data.columns.tolist()}")
 
 # Get all dates from augmented test data
 all_test_dates = tft_test_data['Date'].values
 
-# Find the index where 2023+ starts (after encoder context)
+# Find where 2023+ starts
 test_period_mask = pd.to_datetime(all_test_dates) >= split_date
-test_period_start_idx = test_period_mask.argmax()
+test_dates_2023plus = all_test_dates[test_period_mask]
 
 print(f"\nDate range analysis:")
-print(f"  Test dates min: {pd.to_datetime(all_test_dates).min()}")
-print(f"  Test dates max: {pd.to_datetime(all_test_dates).max()}")
-print(f"  Test period starts at index: {test_period_start_idx}")
-print(f"  Test period predictions: {test_period_mask.sum()}")
-print(f"  Number of dates in test data: {len(all_test_dates)}")
+print(f"  Test data dates: {pd.to_datetime(all_test_dates).min()} to {pd.to_datetime(all_test_dates).max()}")
+print(f"  2023+ samples: {len(test_dates_2023plus)} (from {test_dates_2023plus[0]} to {test_dates_2023plus[-1]})")
 
-# CRITICAL FIX: The predictions might be fewer than dates due to dataloader batching
-# Align predictions with dates based on actual prediction count
-# If we have fewer predictions than dates, we need to use only the valid predictions
-if len(tft_pred_values) < len(all_test_dates):
-    print(f"\nWARNING: Predictions ({len(tft_pred_values)}) < Test dates ({len(all_test_dates)})")
-    print(f"Using last {len(tft_pred_values)} predictions aligned with last {len(tft_pred_values)} dates")
-    
-    # Align by using the LAST predictions with the LAST dates
-    aligned_dates = all_test_dates[-len(tft_pred_values):]
-    tft_pred_values_aligned = tft_pred_values
-    tft_actual_values_aligned = tft_actual_values
-    
-    # Now filter for 2023+ dates
-    test_period_mask_aligned = pd.to_datetime(aligned_dates) >= split_date
-    test_period_start_idx_aligned = test_period_mask_aligned.argmax()
-    
-    print(f"  Aligned test period starts at index: {test_period_start_idx_aligned}")
-    print(f"  Aligned test period predictions: {test_period_mask_aligned.sum()}")
-    
-    tft_pred_values_test = tft_pred_values_aligned[test_period_start_idx_aligned:]
-    tft_actual_values_test = tft_actual_values_aligned[test_period_start_idx_aligned:]
-    test_dates_filtered = aligned_dates[test_period_start_idx_aligned:]
+# Take the last N predictions where N = len(test_dates_2023plus)
+# This corresponds to the 2023+ period
+if len(tft_pred_values) >= len(test_dates_2023plus):
+    tft_pred_values_test = tft_pred_values[-len(test_dates_2023plus):]
+    tft_actual_values_test = tft_actual_values[-len(test_dates_2023plus):]
+    tft_pred_q10_test = tft_pred_q10[-len(test_dates_2023plus):]
+    tft_pred_q90_test = tft_pred_q90[-len(test_dates_2023plus):]
+    test_dates_filtered = test_dates_2023plus
 else:
-    # Normal case: predictions match dates
-    tft_pred_values_test = tft_pred_values[test_period_start_idx:]
-    tft_actual_values_test = tft_actual_values[test_period_start_idx:]
-    test_dates_filtered = all_test_dates[test_period_start_idx:]
+    print(f"\nWARNING: Only {len(tft_pred_values)} predictions for {len(test_dates_2023plus)} expected dates")
+    tft_pred_values_test = tft_pred_values
+    tft_actual_values_test = tft_actual_values
+    tft_pred_q10_test = tft_pred_q10
+    tft_pred_q90_test = tft_pred_q90
+    test_dates_filtered = test_dates_2023plus[-len(tft_pred_values):]
 
-print(f"  Final test predictions: {len(tft_pred_values_test)}")
-print(f"  Final test actual values: {len(tft_actual_values_test)}")
-print(f"  Final test dates: {len(test_dates_filtered)}")
+print(f"\n  Final result:")
+print(f"    Predictions: {len(tft_pred_values_test)}")
+print(f"    Date range: {test_dates_filtered[0]} to {test_dates_filtered[-1]}")
 
-# Create series with proper indices (only test period)
+# Create series with proper date indices (only test period)
 tft_pred_series = pd.Series(
     tft_pred_values_test,
     index=pd.to_datetime(test_dates_filtered),
@@ -1047,8 +1367,15 @@ print(f"\n✓ Created prediction series with date index:")
 print(f"  Index: {tft_pred_series.index.min()} to {tft_pred_series.index.max()}")
 
 # Calculate metrics (convert to variance scale)
-tft_pred_var = np.exp(tft_pred_series)
+print(f"\nConverting from log scale to variance scale:")
+print(f"  Log predictions (first 3): {tft_pred_series.values[:3]}")
+print(f"  Log actuals (first 3): {tft_actual_series.values[:3]}")
+
+tft_pred_var = np.exp(tft_pred_series + 0.5 * residual_variance)
 tft_actual_var = np.exp(tft_actual_series)
+
+print(f"  Variance predictions (first 3): {tft_pred_var.values[:3]}")
+print(f"  Variance actuals (first 3): {tft_actual_var.values[:3]}")
 
 print(f"\n✓ TFT predictions generated on TEST SET (2023+)")
 print(f"  SAME evaluation period as GBM/XGBoost/LightGBM/CatBoost")
@@ -1083,7 +1410,7 @@ print(f"="*80)
 add_tft_results_to_report(tft_qlike, tft_mspe, tft_pred_var, tft_actual_var, 
                            tft_pred_series, tft_actual_series, 
                            len(training_tft), len(validation_tft), report, plt,
-                           tft_pred_q10, tft_pred_q90)
+                           tft_pred_q10_test, tft_pred_q90_test)
 
 print("\n" + "="*80)
 print("✓ TFT EVALUATION COMPLETE")
@@ -1100,11 +1427,19 @@ print("\n" + "="*80)
 print("SAVING TFT PREDICTIONS TO CSV")
 print("="*80)
 
-# Create a DataFrame with the true values and the TFT predictions
+# Create a DataFrame with the true values and the TFT predictions (in variance scale)
+# tft_pred_var and tft_actual_var are already exponentiated Series with date index
 tft_predictions_df = pd.DataFrame({
-    'RV_true': tft_actual_var,
-    'TFT_prediction': tft_pred_var
-})
+    'RV_true': tft_actual_var.values,
+    'TFT_prediction': tft_pred_var.values
+}, index=tft_pred_var.index)
+
+print(f"\nDataFrame info:")
+print(f"  Shape: {tft_predictions_df.shape}")
+print(f"  RV_true range: {tft_predictions_df['RV_true'].min():.6f} to {tft_predictions_df['RV_true'].max():.6f}")
+print(f"  TFT_prediction range: {tft_predictions_df['TFT_prediction'].min():.6f} to {tft_predictions_df['TFT_prediction'].max():.6f}")
+print(f"  Sample values (first 3):")
+print(tft_predictions_df.head(3))
 
 # Save to CSV
 tft_predictions_df.to_csv('tft_predictions.csv', index_label='Date')

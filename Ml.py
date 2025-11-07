@@ -1014,6 +1014,27 @@ if __name__ == "__main__":
     print("SAVING ML PREDICTIONS TO CSV")
     print("="*80)
 
+    # Save individual CSV files for each model (using the largest window for consistency)
+    best_window = max(rolling_windows)  # Use largest window (756 days)
+    
+    for model_name in ml_model_types:
+        # Get predictions for this model
+        results = ml_evaluation_results[best_window][model_name]
+        y_true_var = results['y_true_var']
+        y_pred_var = results['y_pred_var']
+        
+        # Create DataFrame similar to TFT format
+        model_predictions_df = pd.DataFrame({
+            'RV_true': y_true_var,
+            f'ML_{model_name}_w{best_window}': y_pred_var
+        })
+        
+        # Save to individual CSV file
+        filename = f'ml_{model_name}_predictions.csv'
+        model_predictions_df.to_csv(filename, index_label='Date')
+        print(f"✓ Saved {filename} ({len(model_predictions_df)} predictions)")
+
+    # Also save the combined CSV for backward compatibility
     # Get the true values (they are the same for all models in the test set)
     y_true_var = ml_evaluation_results[rolling_windows[0]][ml_model_types[0]]['y_true_var']
     
@@ -1034,7 +1055,7 @@ if __name__ == "__main__":
 
     # Save to CSV
     ml_predictions_df.to_csv('ml_predictions.csv', index_label='Date')
-    print("✓ ML predictions saved to ml_predictions.csv")
+    print("✓ Combined ML predictions saved to ml_predictions.csv")
     print("="*80)
 
 

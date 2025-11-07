@@ -293,19 +293,25 @@ ljung_box_df = {}
 exo_cols = ['UST10Y', 'HYOAS', 'TermSpread_10Y_2Y', 'VIX', 'Breakeven10Y']
 
 for w in window:
+  print(f"\n[Window {w}] Training HARX models on FULL dataset (rolling window)...")
 
   for est in estimators:
-    df_in = pd.concat([train_x[[est]], exo_std_harx_r1[exo_cols]], axis=1)
+    # Use FULL dataset (not just training set) for rolling window predictions
+    # This will generate predictions for ALL time periods including 2023-2024
+    df_in = pd.concat([vol_adj_harx[[est]], exo_std_harx_r1[exo_cols]], axis=1)
     har = HAR_Model(y_log_col=est, exo_col=exo_cols, lags=[1,5,22])
     x_est = har.features(df_in)
-    y_adj = train_y.loc[x_est.index]
+    # Use full y_true_log_harx (not just train_y)
+    y_adj = y_true_log_harx.loc[x_est.index]
     per_est[w][est] = x_est
 
-    y_pred, resid_pred, residual_raw = har.fit_predict(x_est ,y_adj, window=w)
+    y_pred, resid_pred, residual_raw = har.fit_predict(x_est, y_adj, window=w)
 
     per_pred[w][est] = y_pred
     per_residual[w][est] = resid_pred
     pred_raw_residual[w][est] = residual_raw
+    
+    print(f"  {est}: {len(y_pred)} predictions (from {y_pred.index.min()} to {y_pred.index.max()})")
 
   df_pred[w] = pd.DataFrame(per_pred[w])
   df_pred_adj[w] = df_pred[w].dropna()
@@ -315,10 +321,13 @@ for w in window:
 
   #variance scale
   yhat_var[w] = np.exp(df_pred_adj[w])
-  ytrue_var = np.exp(train_y)
+  # Use FULL y_true_log_harx (not just train_y) to evaluate against predictions
+  ytrue_var = np.exp(y_true_log_harx)
   common_idx = yhat_var[w].index.intersection(ytrue_var.index)
   yhat = yhat_var[w].loc[common_idx]
   ytrue = ytrue_var.loc[common_idx]
+  
+  print(f"  Evaluation: {len(yhat)} samples from {common_idx.min()} to {common_idx.max()}")
 
   qlike_loss_df[w] = pd.DataFrame({col: Metric_Evaluation.qlike(ytrue, yhat[col])
                                 for col in yhat.columns})
@@ -590,9 +599,11 @@ print("✓ HAR-X report complete!")
 # =============================================================================
 print("Consolidating and saving HAR-X predictions to CSV...")
 
-# Start with an empty DataFrame
-results_df_harx = pd.DataFrame(index=ytrue_var.index)
-results_df_harx['RV_true'] = ytrue_var
+# Start with full dataset index (not just training set)
+# ytrue_var only contains training set, so we need to use the full y_true_log_harx
+full_ytrue_var = np.exp(y_true_log_harx)
+results_df_harx = pd.DataFrame(index=full_ytrue_var.index)
+results_df_harx['RV_true'] = full_ytrue_var
 
 # Add HAR-X model predictions (yhat_var is a dict of window -> df)
 for w in window:
